@@ -26,12 +26,12 @@ typedef void (*FnAppIndicatorSetIconFull)(void* indicator,
 typedef void (*FnAppIndicatorSetTitle)(void* indicator, const gchar* title);
 
 struct IndicatorApi {
-  void* handle = nullptr;
-  FnAppIndicatorNew new_fn = nullptr;
-  FnAppIndicatorSetStatus set_status_fn = nullptr;
-  FnAppIndicatorSetMenu set_menu_fn = nullptr;
-  FnAppIndicatorSetIconFull set_icon_full_fn = nullptr;
-  FnAppIndicatorSetTitle set_title_fn = nullptr;
+  void* handle;
+  FnAppIndicatorNew new_fn;
+  FnAppIndicatorSetStatus set_status_fn;
+  FnAppIndicatorSetMenu set_menu_fn;
+  FnAppIndicatorSetIconFull set_icon_full_fn;
+  FnAppIndicatorSetTitle set_title_fn;
 
   bool Load() {
     if (handle != nullptr) return new_fn != nullptr;
@@ -360,8 +360,8 @@ static void desktop_method_call_handler(FlMethodChannel* channel,
     response = FL_METHOD_RESPONSE(
         fl_method_success_response_new(fl_value_new_bool(true)));
   } else if (g_strcmp0(method, "isWindowVisible") == 0) {
-    gboolean vis = self->main_window &&
-                   gtk_widget_get_visible(GTK_WIDGET(self->main_window));
+    const bool vis = self->main_window != nullptr &&
+                     gtk_widget_get_visible(GTK_WIDGET(self->main_window)) != FALSE;
     response = FL_METHOD_RESPONSE(
         fl_method_success_response_new(fl_value_new_bool(vis)));
   } else if (g_strcmp0(method, "isFullscreenGameRunning") == 0) {
@@ -424,6 +424,7 @@ static gboolean on_window_delete_event(GtkWidget* widget, GdkEvent* event,
 
 // Called when first Flutter frame received.
 static void first_frame_cb(MyApplication* self, FlView* view) {
+  (void)self;
   gtk_widget_show(gtk_widget_get_toplevel(GTK_WIDGET(view)));
 }
 
@@ -518,6 +519,7 @@ static void my_application_class_init(MyApplicationClass* klass) {
 static void my_application_init(MyApplication* self) {
   self->main_window = nullptr;
   self->desktop_channel = nullptr;
+  self->indicator_api = IndicatorApi{};
   self->tray_indicator = nullptr;
   self->tray_menu = nullptr;
   self->minimize_to_tray = true;

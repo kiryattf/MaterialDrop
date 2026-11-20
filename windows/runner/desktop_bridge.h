@@ -4,6 +4,7 @@
 #include <flutter/binary_messenger.h>
 #include <flutter/encodable_value.h>
 #include <flutter/method_channel.h>
+#include <flutter/standard_method_codec.h>
 #include <windows.h>
 
 #include <memory>

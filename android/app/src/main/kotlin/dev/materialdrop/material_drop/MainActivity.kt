@@ -22,6 +22,7 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import android.provider.Settings
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
@@ -239,6 +240,51 @@ class MainActivity : FlutterActivity() {
                     "disconnectDirectWifi" -> {
                         wifiDirectManager.disconnectDirectWifi()
                         result.success(true)
+                    }
+
+                    "canRequestPackageInstalls" -> {
+                        val allowed = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            packageManager.canRequestPackageInstalls()
+                        } else {
+                            true
+                        }
+                        result.success(allowed)
+                    }
+
+                    "installApk" -> {
+                        val path = call.argument<String>("path")
+                        if (path.isNullOrEmpty()) {
+                            result.error("INVALID_APK", "Missing APK path", null)
+                            return@setMethodCallHandler
+                        }
+                        val apkFile = File(path)
+                        if (!apkFile.exists()) {
+                            result.error("APK_NOT_FOUND", "APK file not found", null)
+                            return@setMethodCallHandler
+                        }
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                            !packageManager.canRequestPackageInstalls()
+                        ) {
+                            val permIntent = Intent(
+                                Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                Uri.parse("package:$packageName")
+                            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            startActivity(permIntent)
+                            result.success("needs_permission")
+                            return@setMethodCallHandler
+                        }
+                        val uri = FileProvider.getUriForFile(
+                            this,
+                            "${packageName}.files",
+                            apkFile
+                        )
+                        val installIntent = Intent(Intent.ACTION_VIEW).apply {
+                            setDataAndType(uri, "application/vnd.android.package-archive")
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        startActivity(installIntent)
+                        result.success("launched")
                     }
 
                     else -> result.notImplemented()

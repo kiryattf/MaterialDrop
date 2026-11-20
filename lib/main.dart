@@ -10,6 +10,7 @@ import 'services/desktop_bridge.dart';
 import 'services/launch_config.dart';
 import 'services/platform_bridge.dart';
 import 'services/settings_controller.dart';
+import 'services/update_service.dart';
 import 'theme/app_theme.dart';
 import 'ui/screens/home_shell.dart';
 import 'ui/widgets/dynamic_island.dart';
@@ -24,6 +25,9 @@ Future<void> main(List<String> args) async {
   final coordinator = TransferCoordinator(settings: settings);
   await coordinator.startServices();
 
+  final updateService = UpdateService();
+  await updateService.init();
+
   final initialShareRaw = await PlatformBridge.instance.getInitialSharedFiles();
   if (initialShareRaw?.deepLink != null && initialShareRaw!.deepLink!.isNotEmpty) {
     coordinator.connectIrohLink(initialShareRaw.deepLink!);
@@ -35,6 +39,7 @@ Future<void> main(List<String> args) async {
     MaterialDropRoot(
       settings: settings,
       coordinator: coordinator,
+      updateService: updateService,
       initialShare: initialShare,
     ),
   );
@@ -69,12 +74,14 @@ Future<ShareLaunchPayload?> _normalizeSharePayload(
 class MaterialDropRoot extends StatefulWidget {
   final SettingsController settings;
   final TransferCoordinator coordinator;
+  final UpdateService? updateService;
   final ShareLaunchPayload? initialShare;
 
   const MaterialDropRoot({
     super.key,
     required this.settings,
     required this.coordinator,
+    this.updateService,
     this.initialShare,
   });
 
@@ -89,6 +96,7 @@ class _MaterialDropRootState extends State<MaterialDropRoot>
   StreamSubscription<String>? _traySub;
   StreamSubscription<String>? _deepLinkSub;
   StreamSubscription<String>? _islandActionSub;
+  Timer? _updateCheckTimer;
   String? _lastNotifiedOfferId;
   String? _lastCompletedOfferId;
   String? _lastWindowTitle;
@@ -114,6 +122,11 @@ class _MaterialDropRootState extends State<MaterialDropRoot>
     widget.coordinator.addListener(_onCoordinatorUpdated);
     if (DesktopBridge.instance.isDesktop) {
       _initDesktopLifecycle();
+    }
+    if (widget.updateService != null) {
+      _updateCheckTimer = Timer(const Duration(seconds: 4), () {
+        unawaited(widget.updateService?.checkInBackgroundIfDue());
+      });
     }
   }
 
@@ -417,6 +430,7 @@ class _MaterialDropRootState extends State<MaterialDropRoot>
 
   @override
   void dispose() {
+    _updateCheckTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     widget.settings.removeListener(_onSettingsUpdated);
     widget.coordinator.removeListener(_onCoordinatorUpdated);
@@ -425,6 +439,7 @@ class _MaterialDropRootState extends State<MaterialDropRoot>
     unawaited(_deepLinkSub?.cancel());
     unawaited(_islandActionSub?.cancel());
     unawaited(DesktopBridge.instance.hideDynamicIsland());
+    widget.updateService?.dispose();
     widget.coordinator.dispose();
     super.dispose();
   }
@@ -489,6 +504,7 @@ class _MaterialDropRootState extends State<MaterialDropRoot>
               home: HomeShell(
                 settings: widget.settings,
                 coordinator: widget.coordinator,
+                updateService: widget.updateService,
                 shareLaunch: _shareLaunch,
                 onExitShareSheet: () {
                   setState(() => _shareLaunch = null);

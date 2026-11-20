@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
@@ -9,15 +10,19 @@ import '../../protocol/transfer_coordinator.dart';
 import '../../services/desktop_bridge.dart';
 import '../../services/platform_bridge.dart';
 import '../../services/settings_controller.dart';
+import '../../services/update_service.dart';
+import '../widgets/update_dialog.dart';
 
 class SettingsScreen extends StatelessWidget {
   final SettingsController settings;
   final TransferCoordinator coordinator;
+  final UpdateService? updateService;
 
   const SettingsScreen({
     super.key,
     required this.settings,
     required this.coordinator,
+    this.updateService,
   });
 
   @override
@@ -506,6 +511,87 @@ class SettingsScreen extends StatelessWidget {
                 ),
               ),
 
+              // Updates
+              if (updateService != null) ...[
+                _SectionHeader(strings.tr('settings_updates_title')),
+                ListenableBuilder(
+                  listenable: updateService!,
+                  builder: (context, _) {
+                    final svc = updateService!;
+                    final hasUpdate = svc.hasUpdate && svc.latestRelease != null;
+                    final statusText = switch (svc.phase) {
+                      UpdatePhase.checking => strings.tr('update_checking'),
+                      UpdatePhase.error =>
+                        strings.tr(svc.errorCode ?? 'update_check_failed'),
+                      _ when hasUpdate => strings.tr(
+                          'update_available_sub',
+                          {'version': svc.latestRelease!.tagName},
+                        ),
+                      UpdatePhase.upToDate => strings.tr('update_up_to_date'),
+                      _ => strings.tr(
+                          'update_current_version',
+                          {'version': 'v${svc.currentVersion}'},
+                        ),
+                    };
+
+                    return Card(
+                      child: ListTile(
+                        leading: Badge(
+                          isLabelVisible: hasUpdate,
+                          child: Icon(
+                            hasUpdate
+                                ? Icons.system_update_rounded
+                                : Icons.update_rounded,
+                            color: hasUpdate
+                                ? scheme.primary
+                                : scheme.onSurfaceVariant,
+                          ),
+                        ),
+                        title: Text(
+                          hasUpdate
+                              ? strings.tr(
+                                  'update_available_title',
+                                  {'version': svc.latestRelease!.tagName},
+                                )
+                              : strings.tr(
+                                  'update_current_version',
+                                  {'version': 'v${svc.currentVersion}'},
+                                ),
+                        ),
+                        subtitle: Text(statusText),
+                        trailing: svc.isBusy
+                            ? const SizedBox(
+                                width: 20,
+                                height: 20,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : hasUpdate
+                                ? FilledButton(
+                                    onPressed: () => UpdateSheetDialog.show(
+                                      context,
+                                      updateService: svc,
+                                      strings: strings,
+                                    ),
+                                    child: Text(strings.tr('update_banner_action')),
+                                  )
+                                : FilledButton.tonal(
+                                    onPressed: () =>
+                                        unawaited(svc.checkForUpdates(force: true)),
+                                    child: Text(strings.tr('update_check_btn')),
+                                  ),
+                        onTap: () => UpdateSheetDialog.show(
+                          context,
+                          updateService: svc,
+                          strings: strings,
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ],
+
               // About
               _SectionHeader(strings.tr('settings_about_title')),
               Card(
@@ -514,7 +600,9 @@ class SettingsScreen extends StatelessWidget {
                     Icons.near_me_rounded,
                     color: scheme.primary,
                   ),
-                  title: const Text('MaterialDrop'),
+                  title: Text(
+                    'MaterialDrop v${updateService?.currentVersion ?? UpdateService.currentVersionRaw}',
+                  ),
                   subtitle: Text(strings.tr('settings_about_desc')),
                 ),
               ),

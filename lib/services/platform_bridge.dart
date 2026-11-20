@@ -259,6 +259,26 @@ class PlatformBridge {
     return fallback.path;
   }
 
+  Future<Directory> getCacheDir() async {
+    try {
+      return await getTemporaryDirectory();
+    } catch (_) {
+      return Directory.systemTemp;
+    }
+  }
+
+  Future<String> installApk(String apkPath) async {
+    if (!Platform.isAndroid) return 'unsupported';
+    try {
+      return await _method.invokeMethod<String>('installApk', {
+            'path': apkPath,
+          }) ??
+          'failed';
+    } catch (e) {
+      return 'error: $e';
+    }
+  }
+
   Future<Directory> getTempStagingDir() async {
     Directory tmp;
     try {

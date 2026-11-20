@@ -1,0 +1,277 @@
+name: Release MaterialDrop
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version override (e.g. 2.1.0) for manual workflow dispatch'
+        required: false
+        default: '2.1.0'
+
+jobs:
+  test:
+    name: Analyze & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native/materialdrop_rust
+
+      - run: cargo test --manifest-path native/materialdrop_rust/Cargo.toml
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.50.0'
+          channel: 'stable'
+          cache: true
+
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test
+
+  build_android:
+    name: Release Android APK
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native/materialdrop_rust
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.50.0'
+          channel: 'stable'
+          cache: true
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build Rust Android FFI libraries
+        shell: bash
+        run: |
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          NDK_DIR="${ANDROID_NDK_HOME:-${ANDROID_NDK_LATEST_HOME:-}}"
+          if [ -z "$NDK_DIR" ] || [ ! -d "$NDK_DIR" ]; then
+            if [ -d "$SDK_ROOT/ndk" ]; then
+              NDK_DIR="$(find "$SDK_ROOT/ndk" -maxdepth 1 -mindepth 1 -type d | sort -V | tail -n1 || true)"
+            fi
+          fi
+          if [ -z "$NDK_DIR" ] || [ ! -d "$NDK_DIR" ]; then
+            SDKMGR="$(find "$SDK_ROOT/cmdline-tools" -name sdkmanager -type f 2>/dev/null | head -n1 || true)"
+            { yes || true; } | "$SDKMGR" --licenses >/dev/null 2>&1 || true
+            "$SDKMGR" --install "ndk;27.0.12077973"
+            NDK_DIR="$SDK_ROOT/ndk/27.0.12077973"
+          fi
+          export ANDROID_NDK_HOME="$NDK_DIR"
+          mkdir -p android/app/src/main/jniLibs
+          cd native/materialdrop_rust
+          cargo ndk -t armeabi-v7a -t arm64-v8a -t x86_64 -P 26 -o ../../android/app/src/main/jniLibs build --release
+
+      - name: Build release APK (arm64)
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            RAW_VER="${GITHUB_REF_NAME#v}"
+          else
+            RAW_VER="${{ inputs.version || '2.1.0' }}"
+          fi
+          BUILD_NAME="${RAW_VER%%-*}"
+          flutter pub get
+          flutter build apk --release \
+            --target-platform android-arm64 \
+            --build-name="$BUILD_NAME" \
+            --build-number="${GITHUB_RUN_NUMBER}" \
+            --dart-define="APP_VERSION=$RAW_VER"
+          mkdir -p dist
+          cp build/app/outputs/flutter-apk/app-release.apk dist/android-arm64.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-arm64.apk
+          path: dist/android-arm64.apk
+          if-no-files-found: error
+
+  build_windows:
+    name: Release Windows x64 Bundle
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native/materialdrop_rust
+
+      - run: cargo build --manifest-path native/materialdrop_rust/Cargo.toml --release
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.50.0'
+          channel: 'stable'
+          cache: true
+
+      - name: Build Windows portable bundle
+        shell: pwsh
+        run: |
+          $rawVer = if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            $env:GITHUB_REF_NAME.TrimStart('v')
+          } else {
+            '${{ inputs.version }}'
+          }
+          if ([string]::IsNullOrWhiteSpace($rawVer)) { $rawVer = '2.1.0' }
+          $buildName = ($rawVer -split '-')[0]
+          flutter pub get
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          flutter build windows --release --build-name="$buildName" --build-number="$env:GITHUB_RUN_NUMBER" --dart-define="APP_VERSION=$rawVer"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Path build\windows\x64\runner\Release\* -DestinationPath dist\windows-x64.zip -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64.zip
+          path: dist/windows-x64.zip
+          if-no-files-found: error
+
+  build_linux:
+    name: Release Linux x64 AppImage
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install GTK3, Layer-Shell, GStreamer & AppImage tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libgtk-layer-shell-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev liblzma-dev squashfs-tools file desktop-file-utils curl
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native/materialdrop_rust
+
+      - run: cargo build --manifest-path native/materialdrop_rust/Cargo.toml --release
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.50.0'
+          channel: 'stable'
+          cache: true
+
+      - name: Build Linux release & package AppImage
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            RAW_VER="${GITHUB_REF_NAME#v}"
+          else
+            RAW_VER="${{ inputs.version || '2.1.0' }}"
+          fi
+          BUILD_NAME="${RAW_VER%%-*}"
+          flutter pub get
+          flutter build linux --release \
+            --build-name="$BUILD_NAME" \
+            --build-number="${GITHUB_RUN_NUMBER}" \
+            --dart-define="APP_VERSION=$RAW_VER"
+
+          mkdir -p AppDir/usr/bin dist
+          cp -a build/linux/x64/release/bundle/. AppDir/usr/bin/
+          cp assets/images/icon.png AppDir/materialdrop.png
+          cp assets/images/icon.png AppDir/.DirIcon
+
+          printf '%s\n' \
+            '[Desktop Entry]' \
+            'Type=Application' \
+            'Name=MaterialDrop' \
+            'Comment=Fast cross-platform nearby and P2P file sharing' \
+            'Exec=material_drop' \
+            'Icon=materialdrop' \
+            'Categories=Utility;Network;' \
+            'MimeType=x-scheme-handler/materialdrop;' \
+            'Terminal=false' \
+            > AppDir/materialdrop.desktop
+
+          printf '%s\n' \
+            '#!/bin/sh' \
+            'HERE="$(dirname "$(readlink -f "${0}")")"' \
+            'export LD_LIBRARY_PATH="${HERE}/usr/bin/lib:${LD_LIBRARY_PATH}"' \
+            'exec "${HERE}/usr/bin/material_drop" "$@"' \
+            > AppDir/AppRun
+          chmod +x AppDir/AppRun
+
+          desktop-file-validate AppDir/materialdrop.desktop
+          curl -fsSL -o appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+          ARCH=x86_64 ./appimagetool --appimage-extract-and-run AppDir dist/linux-x64.AppImage
+          chmod +x dist/linux-x64.AppImage
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64.AppImage
+          path: dist/linux-x64.AppImage
+          if-no-files-found: error
+
+  release:
+    name: Publish Release & Checksums
+    needs: [build_android, build_windows, build_linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Assemble release assets & generate checksums.txt
+        shell: bash
+        run: |
+          mkdir -p release_files
+          cp artifacts/android-arm64.apk/android-arm64.apk release_files/android-arm64.apk
+          cp artifacts/windows-x64.zip/windows-x64.zip release_files/windows-x64.zip
+          cp artifacts/linux-x64.AppImage/linux-x64.AppImage release_files/linux-x64.AppImage
+          (cd release_files && sha256sum android-arm64.apk windows-x64.zip linux-x64.AppImage > checksums.txt)
+          cat release_files/checksums.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-bundle-with-checksums
+          path: release_files/
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            release_files/android-arm64.apk
+            release_files/windows-x64.zip
+            release_files/linux-x64.AppImage
+            release_files/checksums.txt

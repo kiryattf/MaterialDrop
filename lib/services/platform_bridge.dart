@@ -6,6 +6,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import '../models/models.dart';
+import 'desktop_bridge.dart';
 
 class NsdDiscoveryEvent {
   final String type; // 'found' or 'lost'
@@ -310,21 +311,12 @@ class PlatformBridge {
 
   Future<void> copyFileOrImageToClipboard(String pathOrUri) async {
     if (pathOrUri.isEmpty || Platform.isAndroid) return;
-    if (Platform.isWindows) {
+    if (Platform.isWindows || Platform.isLinux) {
       final ext = p.extension(pathOrUri).toLowerCase();
       final isImg = ['.png', '.jpg', '.jpeg', '.bmp', '.webp'].contains(ext);
       if (isImg && File(pathOrUri).existsSync()) {
-        try {
-          final escaped = pathOrUri.replaceAll("'", "''");
-          await Process.run('powershell', [
-            '-NoProfile',
-            '-Command',
-            "Add-Type -AssemblyName System.Windows.Forms; "
-                "[System.Windows.Forms.Clipboard]::SetImage("
-                "[System.Drawing.Image]::FromFile('$escaped'))",
-          ]);
-          return;
-        } catch (_) {}
+        final ok = await DesktopBridge.instance.writeImageToClipboard(pathOrUri);
+        if (ok) return;
       }
     }
     await Clipboard.setData(ClipboardData(text: pathOrUri));

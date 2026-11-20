@@ -59,13 +59,20 @@ class MaterialDropReceiver {
   int get port => _boundPort;
   bool get isRunning => _running;
 
-  Future<void> start({int? explicitPort, bool enableBeacon = true}) async {
+  Future<void> start({
+    int? explicitPort,
+    String? bindAddress,
+    bool enableBeacon = true,
+  }) async {
     if (_running) return;
     _running = true;
 
     final targetPort = explicitPort ?? MdConstants.localHttpPort;
+    final bindIp = (bindAddress != null && bindAddress.isNotEmpty)
+        ? (InternetAddress.tryParse(bindAddress) ?? InternetAddress.anyIPv4)
+        : InternetAddress.anyIPv4;
     _server = await HttpServer.bind(
-      InternetAddress.anyIPv4,
+      bindIp,
       targetPort,
       shared: true,
     );
@@ -170,7 +177,12 @@ class MaterialDropReceiver {
     IOSink? sink;
 
     try {
-      final rawName = request.uri.queryParameters['name'] ?? 'file';
+      final rawRel = request.uri.queryParameters['rel'];
+      final relPath = (rawRel != null && rawRel.isNotEmpty)
+          ? MdConstants.sanitizeRelativePath(rawRel)
+          : null;
+      final rawName = request.uri.queryParameters['name'] ??
+          (relPath != null ? p.posix.basename(relPath) : 'file');
       final fileName = MdConstants.sanitizeFileName(rawName);
       final senderName = request.uri.queryParameters['device'] ?? 'Peer Device';
       final contentLength = request.headers.contentLength;
@@ -193,6 +205,7 @@ class MaterialDropReceiver {
             name: fileName,
             size: totalBytes,
             mimeType: mime,
+            relativePath: relPath,
           ),
         ],
         texts: const [],
@@ -257,11 +270,18 @@ class MaterialDropReceiver {
       await sink.close();
       sink = null;
 
+      var targetBaseDir = downloadDir;
+      if (!Platform.isAndroid && relPath != null && relPath.contains('/')) {
+        final relDir = p.posix.dirname(relPath);
+        if (relDir.isNotEmpty && relDir != '.') {
+          targetBaseDir = p.joinAll([downloadDir, ...relDir.split('/')]);
+        }
+      }
       final savedTarget = await PlatformBridge.instance.finalizeReceivedFile(
         tempFile: partFile,
         fileName: fileName,
         mimeType: mime,
-        windowsDownloadDir: downloadDir,
+        windowsDownloadDir: targetBaseDir,
       );
 
       request.response.statusCode = HttpStatus.ok;

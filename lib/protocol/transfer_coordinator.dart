@@ -42,12 +42,14 @@ class TransferCoordinator extends ChangeNotifier {
   Timer? _autoResetOutgoingTimer;
 
   TransferCoordinator({required this.settings}) {
+    final launch = settings.launchConfig;
     _mdDiscovery = MaterialDropDiscovery(
       instanceId: _instanceId,
+      multiInstance: launch.isMultiInstance,
       deviceNameFn: () => settings.deviceName,
       localPortFn: () => _mdReceiver.port > 0
           ? _mdReceiver.port
-          : MdConstants.localHttpPort,
+          : (launch.port ?? MdConstants.localHttpPort),
       onDeviceFound: _onDeviceDiscovered,
       onDeviceExpired: _onDeviceRemoved,
     );
@@ -72,6 +74,7 @@ class TransferCoordinator extends ChangeNotifier {
       instanceId: _instanceId,
       deviceName: settings.deviceName,
       downloadDir: settings.downloadDir,
+      treatLoopbackAsUsb: !launch.isMultiInstance,
       isTrustedFn: (name, ip) => settings.isTrusted(name, ip),
       autoAcceptAllFn: () => settings.autoAcceptAll,
       autoAcceptTrustedFn: () => settings.autoAcceptTrusted,
@@ -117,8 +120,9 @@ class TransferCoordinator extends ChangeNotifier {
   }
 
   List<String> get localIps => List.unmodifiable(_localIps);
-  int get directPort =>
-      _mdReceiver.port > 0 ? _mdReceiver.port : MdConstants.localHttpPort;
+  int get directPort => _mdReceiver.port > 0
+      ? _mdReceiver.port
+      : (settings.launchConfig.port ?? MdConstants.localHttpPort);
   int get quickSharePort => _qsReceiver.port;
   bool get isDiscovering => _mdDiscovery.isScanning;
   OutgoingTransferState get outgoingState => _outgoingState;
@@ -136,7 +140,10 @@ class TransferCoordinator extends ChangeNotifier {
     _localIps = await PlatformBridge.instance.getLocalIpv4Addresses();
     _allOwnIps = await PlatformBridge.instance.getAllOwnIpv4Addresses();
 
-    await _mdReceiver.start();
+    await _mdReceiver.start(
+      explicitPort: settings.launchConfig.port,
+      bindAddress: settings.launchConfig.bindAddress,
+    );
     if (settings.quickShareEnabled) {
       await _qsReceiver.start(advertiseMdns: true);
     }
@@ -199,8 +206,26 @@ class TransferCoordinator extends ChangeNotifier {
   }
 
   bool _isSelfDevice(NearbyDevice device) {
+    if (device.instanceId != null && device.instanceId == _instanceId) {
+      return true;
+    }
+    final multi = settings.launchConfig.isMultiInstance;
     if (!device.isUsb) {
-      if (_localIps.contains(device.ip) || _allOwnIps.contains(device.ip)) {
+      final isOwnIp =
+          _localIps.contains(device.ip) || _allOwnIps.contains(device.ip);
+      if (!multi) {
+        return isOwnIp;
+      }
+      // In multi-instance mode on the same host, only drop if it matches our own port
+      if (isOwnIp &&
+          device.protocol == TransferProtocol.materialDrop &&
+          device.port == directPort) {
+        return true;
+      }
+      if (isOwnIp &&
+          device.protocol == TransferProtocol.quickShare &&
+          quickSharePort > 0 &&
+          device.port == quickSharePort) {
         return true;
       }
       return false;

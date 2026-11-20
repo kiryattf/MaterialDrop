@@ -1,8 +1,11 @@
+import 'dart:async';
+
 import 'package:material_ui/material_ui.dart';
 
 import '../../l10n/app_strings.dart';
 import '../../models/models.dart';
 import '../../protocol/transfer_coordinator.dart';
+import '../../services/desktop_bridge.dart';
 import '../../services/platform_bridge.dart';
 import '../../services/settings_controller.dart';
 import '../../theme/app_theme.dart';
@@ -32,11 +35,22 @@ class HomeShell extends StatefulWidget {
 
 class _HomeShellState extends State<HomeShell> {
   int _tabIndex = 0;
+  bool? _railExtendedOverride;
+  StreamSubscription<String>? _traySub;
 
   @override
   void initState() {
     super.initState();
     widget.coordinator.addListener(_onCoordinatorUpdate);
+    if (DesktopBridge.instance.isDesktop) {
+      _traySub = DesktopBridge.instance.trayActionStream.listen((action) {
+        if (!mounted) return;
+        if (action == 'send' && _tabIndex != 0) {
+          setState(() => _tabIndex = 0);
+          _syncRadarVisibility();
+        }
+      });
+    }
     _syncRadarVisibility();
   }
 
@@ -68,6 +82,7 @@ class _HomeShellState extends State<HomeShell> {
 
   @override
   void dispose() {
+    unawaited(_traySub?.cancel());
     widget.coordinator.removeListener(_onCoordinatorUpdate);
     super.dispose();
   }
@@ -97,7 +112,11 @@ class _HomeShellState extends State<HomeShell> {
     final hasIncomingBadge =
         widget.coordinator.incomingState is! IncomingIdle;
     final width = MediaQuery.sizeOf(context).width;
-    final isWide = width >= 720;
+    final isWide = width >= 600;
+    final canExpandRail = width >= 840;
+    final railExtended = canExpandRail
+        ? (_railExtendedOverride ?? (width >= 960))
+        : false;
 
     final body = ExpressiveStageSwitcher(
       duration: const Duration(milliseconds: 280),
@@ -107,6 +126,14 @@ class _HomeShellState extends State<HomeShell> {
           0 => SendScreen(
               settings: widget.settings,
               coordinator: widget.coordinator,
+              onOpenReceiveTab: () {
+                setState(() => _tabIndex = 1);
+                _syncRadarVisibility();
+              },
+              onOpenHistoryTab: () {
+                setState(() => _tabIndex = 2);
+                _syncRadarVisibility();
+              },
             ),
           1 => ReceiveScreen(
               settings: widget.settings,
@@ -127,7 +154,13 @@ class _HomeShellState extends State<HomeShell> {
         backgroundColor: scheme.surfaceContainerLow,
         body: Row(
           children: [
-            _buildNavigationRail(context, strings, width >= 960, hasIncomingBadge),
+            _buildNavigationRail(
+              context,
+              strings,
+              railExtended,
+              canExpandRail,
+              hasIncomingBadge,
+            ),
             Expanded(
               child: Padding(
                 padding: const EdgeInsets.fromLTRB(0, 12, 12, 12),
@@ -188,10 +221,12 @@ class _HomeShellState extends State<HomeShell> {
     BuildContext context,
     AppStrings strings,
     bool extended,
+    bool canExpand,
     bool hasIncomingBadge,
   ) {
     final scheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
+    final launch = widget.settings.launchConfig;
 
     return NavigationRail(
       extended: extended,
@@ -201,49 +236,76 @@ class _HomeShellState extends State<HomeShell> {
         _syncRadarVisibility();
       },
       leading: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 18, 12, 20),
-        child: Row(
+        padding: const EdgeInsets.fromLTRB(12, 16, 12, 18),
+        child: Column(
           mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment:
+              extended ? CrossAxisAlignment.start : CrossAxisAlignment.center,
           children: [
-            Container(
-              width: 38,
-              height: 38,
-              decoration: BoxDecoration(
-                color: scheme.primaryContainer,
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Icon(
-                Icons.near_me_rounded,
-                color: scheme.onPrimaryContainer,
-                size: 20,
-              ),
-            ),
-            if (extended) ...[
-              const SizedBox(width: 12),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('MaterialDrop', style: textTheme.titleMedium),
-                  Row(
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 38,
+                  height: 38,
+                  decoration: BoxDecoration(
+                    color: scheme.primaryContainer,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Icon(
+                    Icons.near_me_rounded,
+                    color: scheme.onPrimaryContainer,
+                    size: 20,
+                  ),
+                ),
+                if (extended) ...[
+                  const SizedBox(width: 12),
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Container(
-                        width: 7,
-                        height: 7,
-                        decoration: const BoxDecoration(
-                          color: AppTheme.statusGreen,
-                          shape: BoxShape.circle,
-                        ),
-                      ),
-                      const SizedBox(width: 6),
-                      Text(
-                        strings.tr('online'),
-                        style: textTheme.labelSmall?.copyWith(
-                          color: scheme.onSurfaceVariant,
-                        ),
+                      Text('MaterialDrop', style: textTheme.titleMedium),
+                      Row(
+                        children: [
+                          Container(
+                            width: 7,
+                            height: 7,
+                            decoration: const BoxDecoration(
+                              color: AppTheme.statusGreen,
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          Text(
+                            launch.isMultiInstance
+                                ? '${strings.tr('online')} • :${launch.port ?? 45873}'
+                                : strings.tr('online'),
+                            style: textTheme.labelSmall?.copyWith(
+                              color: scheme.onSurfaceVariant,
+                            ),
+                          ),
+                        ],
                       ),
                     ],
                   ),
+                  if (canExpand) ...[
+                    const SizedBox(width: 4),
+                    IconButton(
+                      onPressed: () {
+                        setState(() => _railExtendedOverride = false);
+                      },
+                      icon: const Icon(Icons.menu_open_rounded, size: 18),
+                    ),
+                  ],
                 ],
+              ],
+            ),
+            if (!extended && canExpand) ...[
+              const SizedBox(height: 8),
+              IconButton(
+                onPressed: () {
+                  setState(() => _railExtendedOverride = true);
+                },
+                icon: const Icon(Icons.menu_rounded, size: 20),
               ),
             ],
           ],

@@ -30,6 +30,30 @@ class MdConstants {
     return base.isEmpty ? 'unnamed_file' : base;
   }
 
+  /// Sanitizes a slash-delimited relative path (preserving subdirectories for
+  /// folder drops while blocking traversal, drive prefixes, and illegal chars).
+  static String sanitizeRelativePath(String raw) {
+    final nulIdx = raw.indexOf('\x00');
+    final truncated = nulIdx >= 0 ? raw.substring(0, nulIdx) : raw;
+    final parts = truncated
+        .replaceAll('\\', '/')
+        .split('/')
+        .map((seg) => seg.trim())
+        .where((seg) =>
+            seg.isNotEmpty &&
+            seg != '.' &&
+            seg != '..' &&
+            !RegExp(r'^[a-zA-Z]:$').hasMatch(seg))
+        .map((seg) => seg
+            .replaceFirst(RegExp(r'^\.+'), '')
+            .replaceAll(RegExp(r'[<>:"|?*]'), '_')
+            .trim())
+        .where((seg) => seg.isNotEmpty)
+        .toList();
+    if (parts.isEmpty) return 'unnamed_file';
+    return parts.join('/');
+  }
+
   static String uniqueFilePath(String dir, String fileName) {
     final safe = sanitizeFileName(fileName);
     var candidate = p.join(dir, safe);

@@ -6,6 +6,7 @@ import 'package:material_ui/material_ui.dart';
 import '../../l10n/app_strings.dart';
 import '../../models/models.dart';
 import '../../protocol/transfer_coordinator.dart';
+import '../../services/desktop_bridge.dart';
 import '../../services/platform_bridge.dart';
 import '../../services/settings_controller.dart';
 
@@ -288,6 +289,21 @@ class SettingsScreen extends StatelessWidget {
                         await coordinator.onSettingsUpdated();
                       },
                     ),
+                    if (DesktopBridge.instance.isDesktop) ...[
+                      const Divider(height: 1, indent: 16, endIndent: 16),
+                      SwitchListTile(
+                        secondary: Icon(
+                          Icons.vertical_align_bottom_rounded,
+                          color: scheme.primary,
+                        ),
+                        title: Text(strings.tr('settings_minimize_tray')),
+                        subtitle: Text(strings.tr('settings_minimize_tray_desc')),
+                        value: settings.minimizeToTray,
+                        onChanged: (v) async {
+                          await settings.setMinimizeToTray(v);
+                        },
+                      ),
+                    ],
                     const Divider(height: 1, indent: 16, endIndent: 16),
                     ListTile(
                       leading: Icon(
@@ -303,12 +319,12 @@ class SettingsScreen extends StatelessWidget {
                         overflow: TextOverflow.ellipsis,
                       ),
                       trailing: Icon(
-                        Platform.isWindows
+                        DesktopBridge.instance.isDesktop
                             ? Icons.chevron_right_rounded
                             : Icons.open_in_new_rounded,
                         size: 18,
                       ),
-                      onTap: Platform.isWindows
+                      onTap: DesktopBridge.instance.isDesktop
                           ? () async {
                               final picked =
                                   await FilePicker.platform.getDirectoryPath();
@@ -375,7 +391,9 @@ class SettingsScreen extends StatelessWidget {
   static String _formatPlatformLabel(String rawManufacturer) {
     final trimmed = rawManufacturer.trim();
     final capitalized = trimmed.isEmpty
-        ? (Platform.isAndroid ? 'Android' : 'Windows')
+        ? (Platform.isAndroid
+            ? 'Android'
+            : (Platform.isLinux ? 'Linux' : 'Windows'))
         : '${trimmed[0].toUpperCase()}${trimmed.substring(1)}';
     if (Platform.isAndroid && capitalized.toLowerCase() != 'android') {
       return '$capitalized • Android';

@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:material_ui/material_ui.dart';
 
+import '../../l10n/app_strings.dart';
 import '../../models/models.dart';
 import '../../services/platform_bridge.dart';
 import '../../services/settings_controller.dart';
@@ -132,6 +133,70 @@ class _HistoryTile extends StatelessWidget {
     required this.settings,
   });
 
+  Future<void> _showContextMenu(
+    BuildContext context,
+    Offset globalPosition,
+    AppStrings strings,
+  ) async {
+    final overlay =
+        Overlay.of(context).context.findRenderObject() as RenderBox?;
+    if (overlay == null) return;
+    final position = RelativeRect.fromRect(
+      Rect.fromLTWH(globalPosition.dx, globalPosition.dy, 0, 0),
+      Offset.zero & overlay.size,
+    );
+
+    final items = <PopupMenuEntry<String>>[];
+    if (entry.isText && entry.textBody != null) {
+      items.add(
+        PopupMenuItem(
+          value: 'copy_text',
+          child: Text(strings.tr('ctx_copy_text')),
+        ),
+      );
+    } else if (entry.pathOrUri.isNotEmpty) {
+      items.addAll([
+        PopupMenuItem(
+          value: 'open',
+          child: Text(strings.tr('ctx_open')),
+        ),
+        PopupMenuItem(
+          value: 'folder',
+          child: Text(strings.tr('ctx_show_folder')),
+        ),
+        PopupMenuItem(
+          value: 'copy_path',
+          child: Text(strings.tr('ctx_copy_path')),
+        ),
+      ]);
+    }
+    if (items.isEmpty) return;
+
+    final chosen = await showMenu<String>(
+      context: context,
+      position: position,
+      items: items,
+    );
+    switch (chosen) {
+      case 'copy_text':
+        if (entry.textBody != null) {
+          await PlatformBridge.instance.copyTextToClipboard(entry.textBody!);
+        }
+      case 'open':
+        await PlatformBridge.instance.openFile(
+          entry.pathOrUri,
+          mimeType: entry.mimeType,
+        );
+      case 'folder':
+        await PlatformBridge.instance.showInFolder(
+          entry.pathOrUri,
+          settings.downloadDir,
+        );
+      case 'copy_path':
+        await PlatformBridge.instance.copyTextToClipboard(entry.pathOrUri);
+    }
+  }
+
   bool _isLocalImage() {
     if (entry.isText || entry.pathOrUri.isEmpty) return false;
     if (entry.pathOrUri.startsWith('content://')) return false;
@@ -164,11 +229,14 @@ class _HistoryTile extends StatelessWidget {
                 )
             : null);
 
-    return Card(
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: primaryAction,
-        child: Padding(
+    return GestureDetector(
+      onSecondaryTapDown: (details) =>
+          _showContextMenu(context, details.globalPosition, strings),
+      child: Card(
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: primaryAction,
+          child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
           child: Row(
             children: [
@@ -275,6 +343,7 @@ class _HistoryTile extends StatelessWidget {
             ],
           ),
         ),
+      ),
       ),
     );
   }

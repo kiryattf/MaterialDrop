@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:material_ui/material_ui.dart';
 
 import '../models/models.dart';
@@ -57,6 +59,9 @@ class AppTheme {
       useMaterial3: true,
       brightness: brightness,
       colorScheme: scheme,
+      visualDensity: (Platform.isWindows || Platform.isLinux)
+          ? VisualDensity.compact
+          : VisualDensity.standard,
       scaffoldBackgroundColor: scheme.surface,
       textTheme: textTheme,
       appBarTheme: AppBarTheme(

@@ -17,6 +17,7 @@ class NearbyDevice {
   final TransferProtocol protocol;
   final bool isUsb;
   final String? endpointId;
+  final String? instanceId;
   final DateTime lastSeen;
 
   const NearbyDevice({
@@ -29,6 +30,7 @@ class NearbyDevice {
     required this.isUsb,
     required this.lastSeen,
     this.endpointId,
+    this.instanceId,
   });
 
   NearbyDevice copyWith({
@@ -40,6 +42,7 @@ class NearbyDevice {
     TransferProtocol? protocol,
     bool? isUsb,
     String? endpointId,
+    String? instanceId,
     DateTime? lastSeen,
   }) {
     return NearbyDevice(
@@ -51,6 +54,7 @@ class NearbyDevice {
       protocol: protocol ?? this.protocol,
       isUsb: isUsb ?? this.isUsb,
       endpointId: endpointId ?? this.endpointId,
+      instanceId: instanceId ?? this.instanceId,
       lastSeen: lastSeen ?? this.lastSeen,
     );
   }
@@ -62,6 +66,7 @@ class StagedFile {
   final String mimeType;
   final String? path;
   final String? contentUri;
+  final String? relativePath;
 
   const StagedFile({
     required this.name,
@@ -69,7 +74,11 @@ class StagedFile {
     required this.mimeType,
     this.path,
     this.contentUri,
+    this.relativePath,
   });
+
+  String get displayName =>
+      (relativePath != null && relativePath!.isNotEmpty) ? relativePath! : name;
 
   String get extension {
     final idx = name.lastIndexOf('.');
@@ -162,11 +171,13 @@ class IncomingFileMeta {
   final String name;
   final int size;
   final String mimeType;
+  final String? relativePath;
 
   const IncomingFileMeta({
     required this.name,
     required this.size,
     required this.mimeType,
+    this.relativePath,
   });
 }
 

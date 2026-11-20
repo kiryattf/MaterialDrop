@@ -74,8 +74,11 @@ class MaterialDropSender {
     try {
       final encName = Uri.encodeQueryComponent(file.name);
       final encDevice = Uri.encodeQueryComponent(localDeviceName);
+      final relQuery = (file.relativePath != null && file.relativePath!.isNotEmpty)
+          ? '&rel=${Uri.encodeQueryComponent(file.relativePath!)}'
+          : '';
       final uri = Uri.parse(
-        'http://${device.ip}:${device.port}/upload?name=$encName&device=$encDevice',
+        'http://${device.ip}:${device.port}/upload?name=$encName&device=$encDevice$relQuery',
       );
 
       final request = await client.postUrl(uri);

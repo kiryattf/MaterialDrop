@@ -3,13 +3,17 @@ import 'dart:io';
 
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:mime/mime.dart';
 import 'package:path/path.dart' as p;
 
 import '../../l10n/app_strings.dart';
 import '../../models/models.dart';
+import '../../protocol/direct/md_constants.dart';
 import '../../protocol/transfer_coordinator.dart';
+import '../../services/desktop_bridge.dart';
+import '../../services/platform_bridge.dart';
 import '../../services/settings_controller.dart';
 import '../../theme/app_theme.dart';
 import '../motion/md3_springs.dart';
@@ -23,6 +27,8 @@ class SendScreen extends StatefulWidget {
   final List<StagedFile> initialFiles;
   final bool isShareSheet;
   final VoidCallback? onCloseShareSheet;
+  final VoidCallback? onOpenReceiveTab;
+  final VoidCallback? onOpenHistoryTab;
 
   const SendScreen({
     super.key,
@@ -31,6 +37,8 @@ class SendScreen extends StatefulWidget {
     this.initialFiles = const [],
     this.isShareSheet = false,
     this.onCloseShareSheet,
+    this.onOpenReceiveTab,
+    this.onOpenHistoryTab,
   });
 
   @override
@@ -123,24 +131,126 @@ class _SendScreenState extends State<SendScreen> {
 
   void _handleDroppedFiles(List<String> paths) {
     final picked = <StagedFile>[];
-    for (final path in paths) {
-      final f = File(path);
-      if (f.existsSync()) {
-        final name = p.basename(path);
+    for (final rawPath in paths) {
+      final type = FileSystemEntity.typeSync(rawPath, followLinks: true);
+      if (type == FileSystemEntityType.file) {
+        final f = File(rawPath);
+        final name = p.basename(rawPath);
         picked.add(
           StagedFile(
             name: name,
             size: f.lengthSync(),
             mimeType: lookupMimeType(name) ?? 'application/octet-stream',
-            path: path,
+            path: rawPath,
           ),
         );
+      } else if (type == FileSystemEntityType.directory) {
+        final rootDir = Directory(rawPath);
+        final rootName = p.basename(p.normalize(rawPath));
+        try {
+          for (final entity
+              in rootDir.listSync(recursive: true, followLinks: false)) {
+            if (entity is! File) continue;
+            final relUnderRoot = p.relative(entity.path, from: rawPath);
+            final parts = p.split(relUnderRoot);
+            if (parts.any((seg) => seg.startsWith('.'))) continue;
+            final normalizedRel = MdConstants.sanitizeRelativePath(
+              p.posix.join(rootName, p.posix.joinAll(parts)),
+            );
+            final name = p.basename(entity.path);
+            picked.add(
+              StagedFile(
+                name: name,
+                size: entity.lengthSync(),
+                mimeType: lookupMimeType(name) ?? 'application/octet-stream',
+                path: entity.path,
+                relativePath: normalizedRel,
+              ),
+            );
+          }
+        } catch (_) {}
       }
     }
     if (picked.isNotEmpty && mounted) {
       setState(() {
         _stagedFiles = picked;
       });
+    }
+  }
+
+  Future<void> _pasteFromClipboard() async {
+    final strings = widget.settings.strings;
+    final stagingDir = await PlatformBridge.instance.getTempStagingDir();
+    final payload = await DesktopBridge.instance.readClipboardPayload(
+      stagingDir.path,
+    );
+    if (!mounted) return;
+
+    switch (payload.type) {
+      case ClipboardContentType.files:
+        _handleDroppedFiles(payload.paths);
+        if (mounted && _stagedFiles.isNotEmpty) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                strings.tr('clipboard_pasted', {'count': '${_stagedFiles.length}'}),
+              ),
+            ),
+          );
+        }
+      case ClipboardContentType.imageFile:
+        final path = payload.paths.isNotEmpty ? payload.paths.first : '';
+        final file = File(path);
+        if (file.existsSync()) {
+          final name = p.basename(path);
+          setState(() {
+            _stagedFiles = [
+              StagedFile(
+                name: name,
+                size: file.lengthSync(),
+                mimeType: lookupMimeType(name) ?? 'image/png',
+                path: path,
+              ),
+            ];
+          });
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(strings.tr('clipboard_pasted', {'count': '1'})),
+            ),
+          );
+        }
+      case ClipboardContentType.text:
+        final text = payload.text ?? '';
+        if (text.isNotEmpty) {
+          final file = File(
+            p.join(
+              stagingDir.path,
+              'clipboard_${DateTime.now().millisecondsSinceEpoch}.txt',
+            ),
+          );
+          await file.writeAsString(text, flush: true);
+          final len = await file.length();
+          if (!mounted) return;
+          setState(() {
+            _stagedFiles = [
+              StagedFile(
+                name: 'clipboard_text.txt',
+                size: len,
+                mimeType: 'text/plain',
+                path: file.path,
+              ),
+            ];
+          });
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(strings.tr('clipboard_pasted', {'count': '1'})),
+            ),
+          );
+        }
+      case ClipboardContentType.empty:
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(strings.tr('clipboard_empty'))),
+        );
     }
   }
 
@@ -151,7 +261,7 @@ class _SendScreenState extends State<SendScreen> {
         ? 2
         : (_stagedFiles.isNotEmpty ? 1 : 0);
 
-    return DropTarget(
+    final content = DropTarget(
       onDragEntered: (_) => setState(() => _draggingOver = true),
       onDragExited: (_) => setState(() => _draggingOver = false),
       onDragDone: (details) {
@@ -159,20 +269,45 @@ class _SendScreenState extends State<SendScreen> {
         _handleDroppedFiles(details.files.map((x) => x.path).toList());
       },
       child: SafeArea(
-        child: Column(
-          children: [
-            if (widget.isShareSheet) _buildShareSheetHeader(context, strings),
-            Expanded(
-              child: ExpressiveStageSwitcher(
-                child: switch (stage) {
-                  0 => _buildPickerStage(context, strings),
-                  1 => _buildRadarStage(context, strings),
-                  _ => _buildThrowStage(context, strings),
-                },
-              ),
-            ),
-          ],
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final useSupportingPane = !widget.isShareSheet &&
+                MediaQuery.sizeOf(context).width >= 840 &&
+                constraints.maxWidth >= 720;
+            if (useSupportingPane) {
+              return _buildDesktopSupportingLayout(context, strings);
+            }
+            return Column(
+              children: [
+                if (widget.isShareSheet)
+                  _buildShareSheetHeader(context, strings),
+                Expanded(
+                  child: ExpressiveStageSwitcher(
+                    child: switch (stage) {
+                      0 => _buildPickerStage(context, strings),
+                      1 => _buildRadarStage(context, strings),
+                      _ => _buildThrowStage(context, strings),
+                    },
+                  ),
+                ),
+              ],
+            );
+          },
         ),
+      ),
+    );
+
+    if (!DesktopBridge.instance.isDesktop) {
+      return content;
+    }
+    return CallbackShortcuts(
+      bindings: <ShortcutActivator, VoidCallback>{
+        const SingleActivator(LogicalKeyboardKey.keyV, control: true):
+            _pasteFromClipboard,
+      },
+      child: Focus(
+        autofocus: true,
+        child: content,
       ),
     );
   }
@@ -258,17 +393,30 @@ class _SendScreenState extends State<SendScreen> {
                 Text(
                   Platform.isAndroid
                       ? strings.tr('select_file_hint_mobile')
-                      : strings.tr('select_file_hint'),
+                      : strings.tr('drop_folder_hint'),
                   textAlign: TextAlign.center,
                   style: textTheme.bodyMedium?.copyWith(
                     color: scheme.onSurfaceVariant,
                   ),
                 ),
                 const SizedBox(height: 28),
-                FilledButton.icon(
-                  onPressed: _pickFiles,
-                  icon: const Icon(Icons.folder_open_rounded),
-                  label: Text(strings.tr('choose_files')),
+                Wrap(
+                  spacing: 10,
+                  runSpacing: 10,
+                  alignment: WrapAlignment.center,
+                  children: [
+                    FilledButton.icon(
+                      onPressed: _pickFiles,
+                      icon: const Icon(Icons.folder_open_rounded),
+                      label: Text(strings.tr('choose_files')),
+                    ),
+                    if (DesktopBridge.instance.isDesktop)
+                      OutlinedButton.icon(
+                        onPressed: _pasteFromClipboard,
+                        icon: const Icon(Icons.content_paste_rounded),
+                        label: Text(strings.tr('paste_clipboard')),
+                      ),
+                  ],
                 ),
               ],
             ),
@@ -342,6 +490,823 @@ class _SendScreenState extends State<SendScreen> {
         ),
       ),
     );
+  }
+
+  Widget _buildDesktopSupportingLayout(
+    BuildContext context,
+    AppStrings strings,
+  ) {
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    final devices = widget.coordinator.devices;
+    final totalBytes = _stagedFiles.fold<int>(0, (s, f) => s + f.size);
+    final isThrowing = _selectedDevice != null && _stagedFiles.isNotEmpty;
+
+    return Padding(
+      key: const ValueKey('stage_desktop_supporting'),
+      padding: const EdgeInsets.all(16),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // Left Main Pane: Drag-and-Drop DropZone + Radar / Throw stage
+          Expanded(
+            flex: 6,
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 200),
+              decoration: BoxDecoration(
+                color: _draggingOver
+                    ? scheme.primaryContainer.withValues(alpha: 0.28)
+                    : scheme.surfaceContainerLow,
+                borderRadius: BorderRadius.circular(28),
+                border: Border.all(
+                  color: _draggingOver
+                      ? scheme.primary
+                      : scheme.outlineVariant.withValues(alpha: 0.45),
+                  width: _draggingOver ? 2.2 : 1,
+                ),
+              ),
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                children: [
+                  if (_stagedFiles.isNotEmpty)
+                    _buildStagedFilesCard(context, strings, totalBytes)
+                  else
+                    _buildDesktopDropBanner(context, strings),
+                  const SizedBox(height: 12),
+                  Expanded(
+                    child: ExpressiveStageSwitcher(
+                      child: isThrowing
+                          ? _buildThrowStage(context, strings)
+                          : Column(
+                              key: const ValueKey('desktop_radar_pane'),
+                              children: [
+                                Expanded(
+                                  child: Center(
+                                    child: SonarRadar(
+                                      devices: devices,
+                                      thisDeviceLabel:
+                                          strings.tr('this_device'),
+                                      isTrusted: (d) =>
+                                          widget.settings.isDeviceTrusted(d),
+                                      onDeviceSelected: (dev) =>
+                                          _selectOrPickForDevice(dev),
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(height: 6),
+                                Row(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    Flexible(
+                                      child: Text(
+                                        devices.isEmpty
+                                            ? strings.tr('searching_devices')
+                                            : strings.tr('select_device_first'),
+                                        style: textTheme.bodyMedium?.copyWith(
+                                          color: devices.isEmpty
+                                              ? scheme.onSurfaceVariant
+                                              : scheme.primary,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    IconButton.filledTonal(
+                                      onPressed: () =>
+                                          widget.coordinator.refreshDiscovery(),
+                                      icon: const Icon(
+                                        Icons.refresh_rounded,
+                                        size: 18,
+                                      ),
+                                      tooltip: strings.tr('refresh'),
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(width: 16),
+
+          // Right Supporting Pane: Queue, Devices, Recent History, Quick Settings
+          SizedBox(
+            width: 368,
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _buildSupportingQueueCard(context, strings, totalBytes),
+                  const SizedBox(height: 12),
+                  _buildSupportingDevicesCard(context, strings, devices),
+                  const SizedBox(height: 12),
+                  _buildSupportingHistoryCard(context, strings),
+                  const SizedBox(height: 12),
+                  _buildSupportingQuickSettingsCard(context, strings),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _selectOrPickForDevice(NearbyDevice dev) async {
+    if (_stagedFiles.isEmpty) {
+      await _pickFiles();
+    }
+    if (_stagedFiles.isNotEmpty && mounted) {
+      setState(() => _selectedDevice = dev);
+    }
+  }
+
+  Widget _buildDesktopDropBanner(BuildContext context, AppStrings strings) {
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    return Card(
+      color: scheme.surfaceContainerHigh,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        child: Row(
+          children: [
+            Container(
+              width: 44,
+              height: 44,
+              decoration: BoxDecoration(
+                color: scheme.primaryContainer,
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: Icon(
+                Icons.upload_file_rounded,
+                color: scheme.onPrimaryContainer,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    _draggingOver
+                        ? strings.tr('drop_files_here')
+                        : strings.tr('select_file'),
+                    style: textTheme.titleSmall,
+                  ),
+                  Text(
+                    strings.tr('drop_folder_hint'),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: textTheme.bodySmall?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            if (DesktopBridge.instance.isDesktop) ...[
+              IconButton.outlined(
+                onPressed: _pasteFromClipboard,
+                icon: const Icon(Icons.content_paste_rounded, size: 18),
+                tooltip: strings.tr('paste_clipboard'),
+              ),
+              const SizedBox(width: 6),
+            ],
+            FilledButton.icon(
+              onPressed: _pickFiles,
+              icon: const Icon(Icons.folder_open_rounded, size: 18),
+              label: Text(strings.tr('choose_files')),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSupportingQueueCard(
+    BuildContext context,
+    AppStrings strings,
+    int totalBytes,
+  ) {
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    final outgoing = widget.coordinator.outgoingState;
+    final incoming = widget.coordinator.incomingState;
+
+    if (outgoing is! OutgoingIdle) {
+      return _buildOutgoingStatusCard(context, strings, outgoing);
+    }
+
+    if (incoming is! IncomingIdle) {
+      return Card(
+        color: scheme.secondaryContainer,
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(
+                    Icons.download_rounded,
+                    color: scheme.onSecondaryContainer,
+                    size: 20,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      strings.tr('tab_receive'),
+                      style: textTheme.titleSmall?.copyWith(
+                        color: scheme.onSecondaryContainer,
+                      ),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: widget.onOpenReceiveTab,
+                    child: Text(strings.tr('ctx_open')),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 6),
+              if (incoming is IncomingOfferPending) ...[
+                Text(
+                  '${incoming.offer.senderName} • ${incoming.offer.files.length + incoming.offer.texts.length} (${formatFileSize(incoming.offer.totalSize)})',
+                  style: textTheme.bodySmall?.copyWith(
+                    color: scheme.onSecondaryContainer,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    FilledButton(
+                      onPressed: () => widget.coordinator.acceptIncoming(),
+                      child: Text(strings.tr('accept')),
+                    ),
+                    const SizedBox(width: 8),
+                    OutlinedButton(
+                      onPressed: () => widget.coordinator.cancelIncoming(),
+                      child: Text(strings.tr('decline')),
+                    ),
+                  ],
+                ),
+              ] else if (incoming is IncomingReceiving) ...[
+                Text(
+                  incoming.currentFileName,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: textTheme.bodySmall,
+                ),
+                const SizedBox(height: 6),
+                LinearProgressIndicator(
+                  value: incoming.progress > 0 ? incoming.progress : null,
+                ),
+              ] else if (incoming is IncomingCompleted) ...[
+                Text(
+                  strings.tr('tray_received_body', {
+                    'device': incoming.offer.senderName,
+                    'count':
+                        '${incoming.savedItems.length + incoming.receivedTexts.length}',
+                  }),
+                  style: textTheme.bodySmall,
+                ),
+              ] else if (incoming is IncomingError) ...[
+                Text(incoming.message, style: textTheme.bodySmall),
+              ],
+            ],
+          ),
+        ),
+      );
+    }
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.layers_rounded, color: scheme.primary, size: 18),
+                const SizedBox(width: 8),
+                Text(strings.tr('queue_title'), style: textTheme.titleSmall),
+                const Spacer(),
+                if (_stagedFiles.isNotEmpty)
+                  Text(
+                    formatFileSize(totalBytes),
+                    style: textTheme.labelMedium?.tabular.copyWith(
+                      color: scheme.primary,
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            if (_stagedFiles.isEmpty)
+              Text(
+                strings.tr('drop_folder_hint'),
+                style: textTheme.bodySmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+              )
+            else ...[
+              for (final f in _stagedFiles.take(3))
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 2),
+                  child: Row(
+                    children: [
+                      Icon(
+                        Icons.insert_drive_file_outlined,
+                        size: 15,
+                        color: scheme.onSurfaceVariant,
+                      ),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          f.displayName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: textTheme.bodySmall,
+                        ),
+                      ),
+                      Text(
+                        formatFileSize(f.size),
+                        style: textTheme.labelSmall?.tabular.copyWith(
+                          color: scheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              if (_stagedFiles.length > 3)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text(
+                    '+${_stagedFiles.length - 3} more',
+                    style: textTheme.labelSmall?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSupportingDevicesCard(
+    BuildContext context,
+    AppStrings strings,
+    List<NearbyDevice> devices,
+  ) {
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.devices_rounded, color: scheme.primary, size: 18),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    devices.isEmpty
+                        ? strings.tr('nearby_devices_title')
+                        : '${strings.tr('nearby_devices_title')} (${devices.length})',
+                    style: textTheme.titleSmall,
+                  ),
+                ),
+                IconButton(
+                  onPressed: () => widget.coordinator.refreshDiscovery(),
+                  icon: const Icon(Icons.refresh_rounded, size: 18),
+                  tooltip: strings.tr('refresh'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            if (devices.isEmpty)
+              Text(
+                strings.tr('searching_devices'),
+                style: textTheme.bodySmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+              )
+            else
+              for (final dev in devices) ...[
+                GestureDetector(
+                  onSecondaryTapDown: (details) => _showDeviceContextMenu(
+                    context,
+                    details.globalPosition,
+                    dev,
+                    strings,
+                  ),
+                  child: Card(
+                    elevation: 0,
+                    color: _selectedDevice?.id == dev.id
+                        ? scheme.primaryContainer.withValues(alpha: 0.45)
+                        : scheme.surfaceContainerLow,
+                    margin: const EdgeInsets.only(bottom: 6),
+                    clipBehavior: Clip.antiAlias,
+                    child: InkWell(
+                      hoverColor: scheme.primary.withValues(alpha: 0.08),
+                      onTap: () => _selectOrPickForDevice(dev),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 8,
+                        ),
+                        child: Row(
+                          children: [
+                            Icon(
+                              dev.isUsb
+                                  ? Icons.usb_rounded
+                                  : (dev.kind == DeviceKind.pc
+                                      ? Icons.laptop_windows_rounded
+                                      : Icons.smartphone_rounded),
+                              size: 18,
+                              color: widget.settings.isDeviceTrusted(dev)
+                                  ? scheme.primary
+                                  : scheme.onSurfaceVariant,
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    dev.name,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: textTheme.bodyMedium?.copyWith(
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                  Text(
+                                    '${dev.protocol == TransferProtocol.quickShare ? strings.tr('protocol_quickshare') : (dev.isUsb ? strings.tr('usb_badge') : strings.tr('protocol_direct'))} • ${dev.ip}:${dev.port}',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: textTheme.labelSmall?.copyWith(
+                                      color: scheme.onSurfaceVariant,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            if (widget.settings.isDeviceTrusted(dev))
+                              Icon(
+                                Icons.star_rounded,
+                                size: 16,
+                                color: scheme.primary,
+                              ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSupportingHistoryCard(
+    BuildContext context,
+    AppStrings strings,
+  ) {
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    final recent = widget.settings.history.take(4).toList();
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.history_rounded, color: scheme.primary, size: 18),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    strings.tr('recent_history_title'),
+                    style: textTheme.titleSmall,
+                  ),
+                ),
+                if (widget.onOpenHistoryTab != null)
+                  TextButton(
+                    onPressed: widget.onOpenHistoryTab,
+                    child: Text(strings.tr('tab_history')),
+                  ),
+              ],
+            ),
+            if (recent.isEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  strings.tr('history_empty_title'),
+                  style: textTheme.bodySmall?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
+              )
+            else
+              for (final entry in recent)
+                GestureDetector(
+                  onSecondaryTapDown: (details) => _showHistoryContextMenu(
+                    context,
+                    details.globalPosition,
+                    entry,
+                    strings,
+                  ),
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(12),
+                    hoverColor: scheme.primary.withValues(alpha: 0.08),
+                    onTap: (entry.isText && entry.textBody != null)
+                        ? () => PlatformBridge.instance
+                            .copyTextToClipboard(entry.textBody!)
+                        : (entry.pathOrUri.isNotEmpty
+                            ? () => PlatformBridge.instance.openFile(
+                                  entry.pathOrUri,
+                                  mimeType: entry.mimeType,
+                                )
+                            : null),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 6,
+                        vertical: 6,
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(
+                            entry.direction == TransferDirection.incoming
+                                ? Icons.south_west_rounded
+                                : Icons.north_east_rounded,
+                            size: 16,
+                            color: scheme.primary,
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              entry.fileName,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: textTheme.bodySmall,
+                            ),
+                          ),
+                          Text(
+                            formatFileSize(entry.size),
+                            style: textTheme.labelSmall?.tabular.copyWith(
+                              color: scheme.onSurfaceVariant,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSupportingQuickSettingsCard(
+    BuildContext context,
+    AppStrings strings,
+  ) {
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    final port = widget.settings.launchConfig.port ?? 45873;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Wrap(
+              spacing: 8,
+              runSpacing: 6,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              alignment: WrapAlignment.spaceBetween,
+              children: [
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.tune_rounded, color: scheme.primary, size: 18),
+                    const SizedBox(width: 8),
+                    Text(
+                      strings.tr('quick_settings_title'),
+                      style: textTheme.titleSmall,
+                    ),
+                  ],
+                ),
+                ActionChip(
+                  label: Text(
+                    '${widget.settings.deviceName} • :$port',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  onPressed: () => _editDeviceNameDialog(context, strings),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            ListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.folder_outlined, color: scheme.primary),
+              title: Text(strings.tr('settings_save_folder')),
+              subtitle: Text(
+                widget.settings.downloadDir,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              trailing: IconButton(
+                icon: const Icon(Icons.open_in_new_rounded, size: 18),
+                onPressed: () => PlatformBridge.instance.showInFolder(
+                  '',
+                  widget.settings.downloadDir,
+                ),
+              ),
+              onTap: () async {
+                final picked = await FilePicker.platform.getDirectoryPath();
+                if (picked != null && picked.isNotEmpty) {
+                  await widget.settings.setDownloadDir(picked);
+                  await widget.coordinator.onSettingsUpdated();
+                }
+              },
+            ),
+            SwitchListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              title: Text(strings.tr('settings_auto_all')),
+              value: widget.settings.autoAcceptAll,
+              onChanged: (v) async {
+                await widget.settings.setAutoAcceptAll(v);
+                await widget.coordinator.onSettingsUpdated();
+              },
+            ),
+            if (DesktopBridge.instance.isDesktop)
+              SwitchListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                title: Text(strings.tr('settings_minimize_tray')),
+                value: widget.settings.minimizeToTray,
+                onChanged: (v) => widget.settings.setMinimizeToTray(v),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _editDeviceNameDialog(
+    BuildContext context,
+    AppStrings strings,
+  ) async {
+    final controller = TextEditingController(text: widget.settings.deviceName);
+    final updated = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(strings.tr('device_name_label')),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          onSubmitted: (v) => Navigator.of(ctx).pop(v),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: Text(strings.tr('cancel')),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(controller.text),
+            child: Text(strings.tr('save')),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (updated != null && updated.trim().isNotEmpty) {
+      await widget.settings.setDeviceName(updated.trim());
+      await widget.coordinator.onSettingsUpdated();
+    }
+  }
+
+  Future<void> _showDeviceContextMenu(
+    BuildContext context,
+    Offset globalPosition,
+    NearbyDevice device,
+    AppStrings strings,
+  ) async {
+    final overlay =
+        Overlay.of(context).context.findRenderObject() as RenderBox?;
+    if (overlay == null) return;
+    final trusted = widget.settings.isDeviceTrusted(device);
+    final chosen = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromRect(
+        Rect.fromLTWH(globalPosition.dx, globalPosition.dy, 0, 0),
+        Offset.zero & overlay.size,
+      ),
+      items: [
+        PopupMenuItem(value: 'send', child: Text(strings.tr('ctx_send'))),
+        PopupMenuItem(
+          value: 'trust',
+          child: Text(
+            trusted ? strings.tr('ctx_untrust') : strings.tr('ctx_trust'),
+          ),
+        ),
+        if (device.ip.isNotEmpty)
+          PopupMenuItem(
+            value: 'copy_ip',
+            child: Text(strings.tr('ctx_copy_ip')),
+          ),
+      ],
+    );
+    switch (chosen) {
+      case 'send':
+        await _selectOrPickForDevice(device);
+      case 'trust':
+        await widget.settings.setTrusted(
+          device.name,
+          !trusted,
+          extraId: device.id,
+        );
+      case 'copy_ip':
+        await PlatformBridge.instance.copyTextToClipboard(
+          '${device.ip}:${device.port}',
+        );
+    }
+  }
+
+  Future<void> _showHistoryContextMenu(
+    BuildContext context,
+    Offset globalPosition,
+    HistoryEntry entry,
+    AppStrings strings,
+  ) async {
+    final overlay =
+        Overlay.of(context).context.findRenderObject() as RenderBox?;
+    if (overlay == null) return;
+    final items = <PopupMenuEntry<String>>[];
+    if (entry.isText && entry.textBody != null) {
+      items.add(
+        PopupMenuItem(
+          value: 'copy_text',
+          child: Text(strings.tr('ctx_copy_text')),
+        ),
+      );
+    } else if (entry.pathOrUri.isNotEmpty) {
+      items.addAll([
+        PopupMenuItem(value: 'open', child: Text(strings.tr('ctx_open'))),
+        PopupMenuItem(
+          value: 'folder',
+          child: Text(strings.tr('ctx_show_folder')),
+        ),
+        PopupMenuItem(
+          value: 'copy_path',
+          child: Text(strings.tr('ctx_copy_path')),
+        ),
+      ]);
+    }
+    if (items.isEmpty) return;
+
+    final chosen = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromRect(
+        Rect.fromLTWH(globalPosition.dx, globalPosition.dy, 0, 0),
+        Offset.zero & overlay.size,
+      ),
+      items: items,
+    );
+    switch (chosen) {
+      case 'copy_text':
+        if (entry.textBody != null) {
+          await PlatformBridge.instance.copyTextToClipboard(entry.textBody!);
+        }
+      case 'open':
+        await PlatformBridge.instance.openFile(
+          entry.pathOrUri,
+          mimeType: entry.mimeType,
+        );
+      case 'folder':
+        await PlatformBridge.instance.showInFolder(
+          entry.pathOrUri,
+          widget.settings.downloadDir,
+        );
+      case 'copy_path':
+        await PlatformBridge.instance.copyTextToClipboard(entry.pathOrUri);
+    }
   }
 
   Widget _buildRadarStage(BuildContext context, AppStrings strings) {

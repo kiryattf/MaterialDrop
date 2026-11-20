@@ -19,6 +19,7 @@ class MaterialDropDiscovery {
   bool _subnetScanningInFlight = false;
 
   final String instanceId;
+  final bool multiInstance;
   final String Function() deviceNameFn;
   final int Function() localPortFn;
   final void Function(NearbyDevice device) onDeviceFound;
@@ -28,6 +29,7 @@ class MaterialDropDiscovery {
 
   MaterialDropDiscovery({
     this.instanceId = '',
+    this.multiInstance = false,
     required this.deviceNameFn,
     required this.localPortFn,
     required this.onDeviceFound,
@@ -111,6 +113,7 @@ class MaterialDropDiscovery {
         reusePort: !Platform.isWindows,
       );
       sock.broadcastEnabled = true;
+      sock.multicastLoopback = true;
       _udpSocket = sock;
       _udpSub = sock.listen((ev) {
         if (ev == RawSocketEvent.read) {
@@ -162,6 +165,8 @@ class MaterialDropDiscovery {
   Future<List<InternetAddress>> _getBroadcastAddresses() async {
     final out = <String, InternetAddress>{
       '255.255.255.255': InternetAddress('255.255.255.255'),
+      if (multiInstance) '127.0.0.1': InternetAddress('127.0.0.1'),
+      if (multiInstance) '127.0.0.2': InternetAddress('127.0.0.2'),
     };
     final ips = await PlatformBridge.instance.getLocalIpv4Addresses();
     for (final ip in ips) {
@@ -196,7 +201,13 @@ class MaterialDropDiscovery {
 
       final allOwnIps = await PlatformBridge.instance.getAllOwnIpv4Addresses();
       final myPort = localPortFn();
-      if (allOwnIps.contains(senderIp)) {
+      if (!multiInstance && allOwnIps.contains(senderIp)) {
+        return;
+      }
+      if (multiInstance &&
+          peerInstanceId.isEmpty &&
+          allOwnIps.contains(senderIp) &&
+          peerPort == myPort) {
         return;
       }
 
@@ -224,7 +235,9 @@ class MaterialDropDiscovery {
             : (platform.toLowerCase() == 'android'
                 ? MdConstants.androidHttpPort
                 : MdConstants.pcHttpPort);
-        final kind = _kindFromPlatform(platform, effectivePort, senderIp == '127.0.0.1');
+        final isLoopbackUsb =
+            !multiInstance && senderIp == '127.0.0.1';
+        final kind = _kindFromPlatform(platform, effectivePort, isLoopbackUsb);
         final dev = NearbyDevice(
           id: 'md:$senderIp:$effectivePort',
           name: (peerName != null && peerName.isNotEmpty)
@@ -234,7 +247,8 @@ class MaterialDropDiscovery {
           port: effectivePort,
           kind: kind,
           protocol: TransferProtocol.materialDrop,
-          isUsb: senderIp == '127.0.0.1',
+          isUsb: isLoopbackUsb,
+          instanceId: peerInstanceId.isNotEmpty ? peerInstanceId : null,
           lastSeen: DateTime.now(),
         );
         _seenTimestamps[dev.id] = dev.lastSeen;
@@ -271,6 +285,23 @@ class MaterialDropDiscovery {
       }
       await _checkHttpDirect('127.0.0.1', MdConstants.androidHttpPort, 700,
           forceUsb: true);
+      if (multiInstance) {
+        final myPort = localPortFn();
+        final probePorts = {
+          MdConstants.pcHttpPort,
+          45875,
+          53317,
+          53318,
+          myPort,
+        };
+        final probes = <Future<void>>[];
+        for (final host in const ['127.0.0.1', '127.0.0.2']) {
+          for (final pt in probePorts) {
+            probes.add(_checkHttpDirect(host, pt, 450, forceUsb: false));
+          }
+        }
+        await Future.wait(probes);
+      }
     } else if (Platform.isAndroid) {
       await _checkHttpDirect('127.0.0.1', MdConstants.pcHttpPort, 700,
           forceUsb: true);
@@ -343,7 +374,7 @@ class MaterialDropDiscovery {
           final name = (json['name'] as String?)?.trim();
           final type = (json['type'] as String? ?? '').toLowerCase();
           final platform = (json['platform'] as String? ?? '').toLowerCase();
-          final isUsb = forceUsb || ip == '127.0.0.1';
+          final isUsb = forceUsb || (!multiInstance && ip == '127.0.0.1');
           final kind = isUsb
               ? DeviceKind.usb
               : _kindFromPlatform(
@@ -361,6 +392,7 @@ class MaterialDropDiscovery {
             kind: kind,
             protocol: TransferProtocol.materialDrop,
             isUsb: isUsb,
+            instanceId: peerInstanceId.isNotEmpty ? peerInstanceId : null,
             lastSeen: DateTime.now(),
           );
           _seenTimestamps[dev.id] = dev.lastSeen;

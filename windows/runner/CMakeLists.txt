@@ -21,6 +21,8 @@ add_executable(${BINARY_NAME} WIN32
 # Apply the standard set of build settings. This can be removed for applications
 # that need different build settings.
 apply_standard_settings(${BINARY_NAME})
+# C++/WinRT BLE headers on Windows SDK 10.0.22621+ require standard C++20 coroutines.
+target_compile_features(${BINARY_NAME} PRIVATE cxx_std_20)
 
 # Add preprocessor definitions for the build version.
 target_compile_definitions(${BINARY_NAME} PRIVATE "FLUTTER_VERSION=\"${FLUTTER_VERSION}\"")

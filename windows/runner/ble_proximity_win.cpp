@@ -1,6 +1,9 @@
 #include "ble_proximity_win.h"
 
-#include <windows.h>
+#include <unknwn.h>
+#ifdef GetCurrentTime
+#undef GetCurrentTime
+#endif
 #include <winrt/Windows.Devices.Bluetooth.Advertisement.h>
 #include <winrt/Windows.Devices.Bluetooth.h>
 #include <winrt/Windows.Devices.Radios.h>

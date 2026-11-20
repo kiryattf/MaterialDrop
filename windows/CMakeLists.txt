@@ -87,6 +87,13 @@ if(PLUGIN_BUNDLED_LIBRARIES)
     COMPONENT Runtime)
 endif()
 
+set(MD_RUST_DLL "${CMAKE_CURRENT_SOURCE_DIR}/../native/materialdrop_rust/target/release/materialdrop_rust.dll")
+if(EXISTS "${MD_RUST_DLL}")
+  install(FILES "${MD_RUST_DLL}"
+    DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
+    COMPONENT Runtime)
+endif()
+
 # Copy the native assets provided by the hook/build.dart from all packages.
 set(NATIVE_ASSETS_DIR "${PROJECT_BUILD_DIR}native_assets/windows/")
 install(DIRECTORY "${NATIVE_ASSETS_DIR}"

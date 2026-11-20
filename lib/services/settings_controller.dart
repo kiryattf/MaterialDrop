@@ -14,6 +14,7 @@ class SettingsController extends ChangeNotifier {
   static const _kAutoAcceptTrusted = 'md_auto_accept_trusted';
   static const _kAutoAcceptAll = 'md_auto_accept_all';
   static const _kQuickShareEnabled = 'md_quickshare_enabled';
+  static const _kInternetP2pEnabled = 'md_iroh_enabled';
   static const _kSoundsEnabled = 'md_sounds_enabled';
   static const _kClipboardSync = 'md_clipboard_sync';
   static const _kMinimizeToTray = 'md_minimize_to_tray';
@@ -36,6 +37,7 @@ class SettingsController extends ChangeNotifier {
   bool _autoAcceptTrusted = true;
   bool _autoAcceptAll = false;
   bool _quickShareEnabled = true;
+  bool _internetP2pEnabled = true;
   bool _soundsEnabled = true;
   bool _clipboardSync = true;
   bool _minimizeToTray = true;
@@ -52,6 +54,7 @@ class SettingsController extends ChangeNotifier {
   bool get autoAcceptTrusted => _autoAcceptTrusted;
   bool get autoAcceptAll => _autoAcceptAll;
   bool get quickShareEnabled => _quickShareEnabled;
+  bool get internetP2pEnabled => _internetP2pEnabled;
   bool get soundsEnabled => _soundsEnabled;
   bool get clipboardSync => _clipboardSync;
   bool get minimizeToTray => _minimizeToTray;
@@ -83,6 +86,7 @@ class SettingsController extends ChangeNotifier {
     _autoAcceptTrusted = _prefs?.getBool(_k(_kAutoAcceptTrusted)) ?? true;
     _autoAcceptAll = _prefs?.getBool(_k(_kAutoAcceptAll)) ?? false;
     _quickShareEnabled = _prefs?.getBool(_k(_kQuickShareEnabled)) ?? true;
+    _internetP2pEnabled = _prefs?.getBool(_k(_kInternetP2pEnabled)) ?? true;
     _soundsEnabled = _prefs?.getBool(_k(_kSoundsEnabled)) ?? true;
     _clipboardSync = _prefs?.getBool(_k(_kClipboardSync)) ?? true;
     _minimizeToTray = _prefs?.getBool(_k(_kMinimizeToTray)) ?? true;
@@ -173,6 +177,12 @@ class SettingsController extends ChangeNotifier {
   Future<void> setQuickShareEnabled(bool val) async {
     _quickShareEnabled = val;
     await _prefs?.setBool(_k(_kQuickShareEnabled), val);
+    notifyListeners();
+  }
+
+  Future<void> setInternetP2pEnabled(bool val) async {
+    _internetP2pEnabled = val;
+    await _prefs?.setBool(_k(_kInternetP2pEnabled), val);
     notifyListeners();
   }
 

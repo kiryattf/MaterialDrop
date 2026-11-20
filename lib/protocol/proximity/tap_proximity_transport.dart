@@ -17,6 +17,8 @@ class TapProximityTransport implements TransportChannel {
   final int Function() transferPortFn;
   final String Function() localFingerprintFn;
   final String Function() deviceNameFn;
+  final void Function(String ticketOrLink, String fallbackName)?
+      onIrohTicketReceived;
 
   final ProximityBridge _bridge = ProximityBridge.instance;
   final RssiEmaFilter _rssiFilter = RssiEmaFilter(alpha: 0.35);
@@ -43,13 +45,27 @@ class TapProximityTransport implements TransportChannel {
   bool _discovering = false;
   bool _radarVisible = false;
   bool _hostingDirectWifi = false;
+  String _localIrohTicket = '';
   ProximityStatus _lastStatus = const ProximityStatus();
 
   TapProximityTransport({
     required this.transferPortFn,
     required this.localFingerprintFn,
     required this.deviceNameFn,
+    this.onIrohTicketReceived,
   });
+
+  Future<void> updateIrohTicket(String ticketOrLink) async {
+    _localIrohTicket = ticketOrLink;
+    if (_running) {
+      await _bridge.updateSessionMetadata(
+        deviceName: deviceNameFn(),
+        port: transferPortFn(),
+        fingerprint: localFingerprintFn(),
+        irohTicket: _localIrohTicket,
+      );
+    }
+  }
 
   @override
   String get id => 'tap_proximity';
@@ -119,6 +135,7 @@ class TapProximityTransport implements TransportChannel {
       deviceName: deviceNameFn(),
       port: transferPortFn(),
       fingerprint: localFingerprintFn(),
+      irohTicket: _localIrohTicket.isNotEmpty ? _localIrohTicket : null,
     );
 
     _bleSub = _bridge.blePeerStream.listen(_onBlePeerFound);
@@ -166,6 +183,7 @@ class TapProximityTransport implements TransportChannel {
       deviceName: deviceNameFn(),
       port: transferPortFn(),
       fingerprint: localFingerprintFn(),
+      irohTicket: _localIrohTicket.isNotEmpty ? _localIrohTicket : null,
     );
     await _bridge.startBleDiscovery(
       port: transferPortFn(),
@@ -236,6 +254,8 @@ class TapProximityTransport implements TransportChannel {
       useHttps: handshake?.fingerprint.isNotEmpty == true,
       rssi: smoothed,
       proximityZone: zone,
+      irohTicket:
+          (handshake?.irohTicket.isNotEmpty == true) ? handshake!.irohTicket : null,
       lastSeen: DateTime.now(),
     );
     _emitDevices();
@@ -268,6 +288,13 @@ class TapProximityTransport implements TransportChannel {
       }
     }
 
+    if (ev.irohTicket.isNotEmpty) {
+      onIrohTicketReceived?.call(
+        ev.irohTicket,
+        ev.name.isNotEmpty ? ev.name : 'Nearby Device',
+      );
+    }
+
     _handshakesByPeer[peerId] = ev;
     _seenAt[peerId] = DateTime.now();
     final existing = _peers[peerId];
@@ -287,6 +314,7 @@ class TapProximityTransport implements TransportChannel {
       rssi: ev.source.startsWith('nfc') ? -38 : (existing?.rssi ?? -55),
       proximityZone:
           ev.source.startsWith('nfc') ? 'immediate' : (existing?.proximityZone ?? 'near'),
+      irohTicket: ev.irohTicket.isNotEmpty ? ev.irohTicket : existing?.irohTicket,
       lastSeen: DateTime.now(),
     );
     _emitDevices();

@@ -17,6 +17,7 @@ class DesktopBridge {
  public:
   static constexpr UINT kTrayCallbackMessage = WM_APP + 100;
   static constexpr UINT kBlePeerMessage = WM_APP + 101;
+  static constexpr ULONG_PTR kDeepLinkCopyDataTag = 0x4D445552;  // 'MDUR'
 
   DesktopBridge(HWND hwnd, flutter::BinaryMessenger* messenger);
   ~DesktopBridge();

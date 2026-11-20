@@ -11,6 +11,7 @@ import 'package:path/path.dart' as p;
 import '../../l10n/app_strings.dart';
 import '../../models/models.dart';
 import '../../protocol/direct/md_constants.dart';
+import '../../protocol/iroh/iroh_link.dart';
 import '../../protocol/transfer_coordinator.dart';
 import '../../services/desktop_bridge.dart';
 import '../../services/platform_bridge.dart';
@@ -416,6 +417,12 @@ class _SendScreenState extends State<SendScreen> {
                         icon: const Icon(Icons.content_paste_rounded),
                         label: Text(strings.tr('paste_clipboard')),
                       ),
+                    if (widget.settings.internetP2pEnabled)
+                      OutlinedButton.icon(
+                        onPressed: () => _openConnectP2pDialog(context, strings),
+                        icon: const Icon(Icons.public_rounded),
+                        label: Text(strings.tr('connect_p2p_link')),
+                      ),
                   ],
                 ),
               ],
@@ -433,63 +440,153 @@ class _SendScreenState extends State<SendScreen> {
   ) {
     final scheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
+    final showAndroidQuickShare = Platform.isAndroid;
+    final showP2pButton = widget.settings.internetP2pEnabled;
     return Card(
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-        child: Row(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Container(
-              width: 44,
-              height: 44,
-              decoration: BoxDecoration(
-                color: scheme.primaryContainer,
-                borderRadius: BorderRadius.circular(14),
-              ),
-              child: Icon(
-                _stagedFiles.length > 1
-                    ? Icons.inventory_2_rounded
-                    : Icons.insert_drive_file_rounded,
-                color: scheme.onPrimaryContainer,
-              ),
+            Row(
+              children: [
+                Container(
+                  width: 44,
+                  height: 44,
+                  decoration: BoxDecoration(
+                    color: scheme.primaryContainer,
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: Icon(
+                    _stagedFiles.length > 1
+                        ? Icons.inventory_2_rounded
+                        : Icons.insert_drive_file_rounded,
+                    color: scheme.onPrimaryContainer,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        _stagedFiles.length == 1
+                            ? _stagedFiles.first.name
+                            : strings.tr('files_ready', {
+                                'count': '${_stagedFiles.length}',
+                              }),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: textTheme.titleSmall,
+                      ),
+                      Text(
+                        formatFileSize(totalBytes),
+                        style: textTheme.bodySmall?.tabular.copyWith(
+                          color: scheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                TextButton(
+                  onPressed: _pickFiles,
+                  child: Text(strings.tr('change')),
+                ),
+                if (!widget.isShareSheet)
+                  IconButton(
+                    onPressed: () => setState(() => _stagedFiles = []),
+                    icon: const Icon(Icons.close_rounded, size: 20),
+                    tooltip: strings.tr('clear'),
+                  ),
+              ],
             ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+            if (showAndroidQuickShare || showP2pButton) ...[
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
                 children: [
-                  Text(
-                    _stagedFiles.length == 1
-                        ? _stagedFiles.first.name
-                        : strings.tr('files_ready', {
-                            'count': '${_stagedFiles.length}',
-                          }),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: textTheme.titleSmall,
-                  ),
-                  Text(
-                    formatFileSize(totalBytes),
-                    style: textTheme.bodySmall?.tabular.copyWith(
-                      color: scheme.onSurfaceVariant,
+                  if (showAndroidQuickShare)
+                    FilledButton.tonalIcon(
+                      onPressed: () =>
+                          PlatformBridge.instance.shareViaSystemQuickShare(
+                        _stagedFiles,
+                      ),
+                      icon: const Icon(Icons.bolt_rounded, size: 18),
+                      label: Text(strings.tr('send_via_system_qs')),
                     ),
-                  ),
+                  if (showP2pButton)
+                    OutlinedButton.icon(
+                      onPressed: () => _openConnectP2pDialog(context, strings),
+                      icon: const Icon(Icons.public_rounded, size: 18),
+                      label: Text(strings.tr('connect_p2p_link')),
+                    ),
                 ],
               ),
-            ),
-            TextButton(
-              onPressed: _pickFiles,
-              child: Text(strings.tr('change')),
-            ),
-            if (!widget.isShareSheet)
-              IconButton(
-                onPressed: () => setState(() => _stagedFiles = []),
-                icon: const Icon(Icons.close_rounded, size: 20),
-                tooltip: strings.tr('clear'),
-              ),
+            ],
           ],
         ),
       ),
     );
+  }
+
+  Future<void> _openConnectP2pDialog(
+    BuildContext context,
+    AppStrings strings,
+  ) async {
+    final controller = TextEditingController();
+    String? errorText;
+    final res = await showDialog<String>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          icon: const Icon(Icons.public_rounded),
+          title: Text(strings.tr('connect_p2p_title')),
+          content: TextField(
+            controller: controller,
+            autofocus: true,
+            minLines: 2,
+            maxLines: 4,
+            decoration: InputDecoration(
+              hintText: strings.tr('connect_p2p_hint'),
+              errorText: errorText,
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: Text(strings.tr('cancel')),
+            ),
+            FilledButton(
+              onPressed: () {
+                final parsed = IrohDeepLink.parse(controller.text);
+                if (parsed == null) {
+                  setDialogState(() {
+                    errorText = strings.tr('connect_p2p_invalid');
+                  });
+                  return;
+                }
+                Navigator.of(ctx).pop(controller.text.trim());
+              },
+              child: Text(strings.tr('connect_btn')),
+            ),
+          ],
+        ),
+      ),
+    );
+    controller.dispose();
+    if (res == null || res.isEmpty) return;
+
+    final dev = widget.coordinator.connectIrohLink(res);
+    if (dev != null && mounted) {
+      if (_stagedFiles.isEmpty) {
+        await _pickFiles();
+      }
+      if (mounted && _stagedFiles.isNotEmpty) {
+        setState(() => _selectedDevice = dev);
+      }
+    }
   }
 
   Widget _buildDesktopSupportingLayout(
@@ -619,6 +716,9 @@ class _SendScreenState extends State<SendScreen> {
   String _protocolLabel(NearbyDevice dev, AppStrings strings) {
     if (dev.protocol == TransferProtocol.quickShare) {
       return strings.tr('protocol_quickshare');
+    }
+    if (dev.protocol == TransferProtocol.internetP2p) {
+      return strings.tr('protocol_iroh');
     }
     if (dev.protocol == TransferProtocol.tapProximity) {
       final zoneKey = switch (dev.proximityZone) {
@@ -966,7 +1066,10 @@ class _SendScreenState extends State<SendScreen> {
                                   Text(
                                     dev.protocol == TransferProtocol.tapProximity
                                         ? '${_protocolLabel(dev, strings)}${dev.rssi != null ? ' • ${dev.rssi} dBm' : ''}'
-                                        : '${_protocolLabel(dev, strings)} • ${dev.ip}:${dev.port}',
+                                        : (dev.protocol ==
+                                                TransferProtocol.internetP2p
+                                            ? '${_protocolLabel(dev, strings)} • ${dev.ip}'
+                                            : '${_protocolLabel(dev, strings)} • ${dev.ip}:${dev.port}'),
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis,
                                     style: textTheme.labelSmall?.copyWith(
@@ -1602,6 +1705,14 @@ class _SendScreenState extends State<SendScreen> {
                         ),
                       ),
                       const SizedBox(width: 10),
+                      if (widget.settings.internetP2pEnabled) ...[
+                        IconButton.outlined(
+                          onPressed: () => _openConnectP2pDialog(context, strings),
+                          icon: const Icon(Icons.add_link_rounded, size: 20),
+                          tooltip: strings.tr('connect_p2p_link'),
+                        ),
+                        const SizedBox(width: 6),
+                      ],
                       IconButton.filledTonal(
                         onPressed: () => widget.coordinator.refreshDiscovery(),
                         icon: const Icon(Icons.refresh_rounded, size: 20),

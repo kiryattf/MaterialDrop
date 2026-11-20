@@ -76,6 +76,9 @@ class TransportRouter {
     if (d.protocol == TransferProtocol.tapProximity) {
       return 'tap:${d.instanceId ?? d.id}';
     }
+    if (d.protocol == TransferProtocol.internetP2p) {
+      return 'iroh:${d.endpointId ?? d.id}';
+    }
     return 'peer:${d.ip}:${d.name.trim().toLowerCase()}';
   }
 
@@ -103,6 +106,7 @@ class TransportRouter {
           instanceId: d.instanceId,
           rssi: d.rssi,
           proximityZone: d.proximityZone,
+          irohTicket: d.irohTicket,
         );
         final existing = meta[key];
         if (existing == null || d.lastSeen.isAfter(existing.lastSeen)) {
@@ -204,9 +208,13 @@ class TransportRouter {
 
     if (routes.isEmpty) {
       final preferredId = device.channelId ??
-          (device.protocol == TransferProtocol.quickShare
-              ? 'quickshare'
-              : (device.protocol == TransferProtocol.lan ? 'lan' : 'direct'));
+          switch (device.protocol) {
+            TransferProtocol.quickShare => 'quickshare',
+            TransferProtocol.lan => 'lan',
+            TransferProtocol.tapProximity => 'tap_proximity',
+            TransferProtocol.internetP2p => 'internet_p2p',
+            TransferProtocol.materialDrop => 'direct',
+          };
       final ch = channelById(preferredId);
       if (ch == null) {
         throw StateError('No transport channel available for $preferredId');

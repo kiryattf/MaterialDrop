@@ -257,10 +257,26 @@ class SettingsScreen extends StatelessWidget {
                       secondary:
                           Icon(Icons.share_rounded, color: scheme.primary),
                       title: Text(strings.tr('settings_quickshare')),
-                      subtitle: Text(strings.tr('settings_quickshare_desc')),
+                      subtitle: Text(
+                        coordinator.isUsingNativeQuickShare
+                            ? strings.tr('settings_qs_native')
+                            : strings.tr('settings_quickshare_desc'),
+                      ),
                       value: settings.quickShareEnabled,
                       onChanged: (v) async {
                         await settings.setQuickShareEnabled(v);
+                        await coordinator.onSettingsUpdated();
+                      },
+                    ),
+                    const Divider(height: 1, indent: 16, endIndent: 16),
+                    SwitchListTile(
+                      secondary:
+                          Icon(Icons.public_rounded, color: scheme.primary),
+                      title: Text(strings.tr('settings_iroh')),
+                      subtitle: Text(strings.tr('settings_iroh_desc')),
+                      value: settings.internetP2pEnabled,
+                      onChanged: (v) async {
+                        await settings.setInternetP2pEnabled(v);
                         await coordinator.onSettingsUpdated();
                       },
                     ),

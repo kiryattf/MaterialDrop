@@ -4,12 +4,14 @@ class LaunchConfig {
   final String? bindAddress;
   final String? deviceName;
   final bool startInTray;
+  final String? initialDeepLink;
 
   const LaunchConfig({
     this.port,
     this.bindAddress,
     this.deviceName,
     this.startInTray = false,
+    this.initialDeepLink,
   });
 
   bool get isMultiInstance =>
@@ -30,11 +32,14 @@ class LaunchConfig {
     int? port;
     String? bindAddress;
     String? deviceName;
+    String? initialDeepLink;
     var startInTray = false;
 
     for (var i = 0; i < args.length; i++) {
       final arg = args[i];
-      if (arg == '--tray' || arg == '--background' || arg == '--minimized') {
+      if (arg.startsWith('materialdrop://')) {
+        initialDeepLink = arg.trim();
+      } else if (arg == '--tray' || arg == '--background' || arg == '--minimized') {
         startInTray = true;
       } else if (arg.startsWith('--port=')) {
         final v = int.tryParse(arg.substring('--port='.length).trim());
@@ -62,6 +67,7 @@ class LaunchConfig {
       bindAddress: bindAddress,
       deviceName: deviceName,
       startInTray: startInTray,
+      initialDeepLink: initialDeepLink,
     );
   }
 }

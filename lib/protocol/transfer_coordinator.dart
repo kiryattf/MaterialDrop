@@ -11,6 +11,7 @@ import 'direct/direct_transport.dart';
 import 'direct/md_constants.dart';
 import 'engine/transport_models.dart';
 import 'engine/transport_router.dart';
+import 'iroh/internet_p2p_transport.dart';
 import 'lan/lan_constants.dart';
 import 'lan/lan_transport.dart';
 import 'proximity/proximity_bridge.dart';
@@ -24,6 +25,7 @@ class TransferCoordinator extends ChangeNotifier {
   late final LanTransport _lanTransport;
   late final QuickShareTransport _quickShareTransport;
   late final TapProximityTransport _tapProximityTransport;
+  late final InternetP2PTransport _internetP2PTransport;
   late final TransportRouter _router;
 
   StreamSubscription<List<DiscoveredPeer>>? _peersSub;
@@ -82,6 +84,25 @@ class TransferCoordinator extends ChangeNotifier {
       transferPortFn: () => lanPort,
       localFingerprintFn: () => _lanTransport.fingerprint,
       deviceNameFn: () => settings.deviceName,
+      onIrohTicketReceived: (ticket, name) {
+        _internetP2PTransport.addPeerFromLinkOrTicket(
+          ticket,
+          fallbackName: name,
+        );
+      },
+    );
+
+    _internetP2PTransport = InternetP2PTransport(
+      deviceNameFn: () => settings.deviceName,
+      downloadDirFn: () => settings.downloadDir,
+      enabled: settings.internetP2pEnabled,
+      isTrustedFn: (name, ip) => settings.isTrusted(name, ip),
+      autoAcceptAllFn: () => settings.autoAcceptAll,
+      autoAcceptTrustedFn: () => settings.autoAcceptTrusted,
+      onReadyChanged: (deepLink, nodeId) {
+        unawaited(_tapProximityTransport.updateIrohTicket(deepLink));
+        notifyListeners();
+      },
     );
 
     _router = TransportRouter(
@@ -90,6 +111,7 @@ class TransferCoordinator extends ChangeNotifier {
         _lanTransport,
         _quickShareTransport,
         _tapProximityTransport,
+        _internetP2PTransport,
       ],
       isSelfFn: _isSelfDevice,
       isTrustedFn: settings.isDeviceTrusted,
@@ -113,6 +135,21 @@ class TransferCoordinator extends ChangeNotifier {
 
   int get quickSharePort => _quickShareTransport.boundPort;
   ProximityStatus get proximityStatus => _tapProximityTransport.lastStatus;
+  String get localIrohDeepLink => _internetP2PTransport.deepLink;
+  String get localIrohNodeId => _internetP2PTransport.nodeId;
+  bool get isIrohReady => _internetP2PTransport.isEndpointReady;
+  bool get isUsingNativeQuickShare => _quickShareTransport.isUsingNativeCore;
+
+  NearbyDevice? connectIrohLink(String rawLink, {String? fallbackName}) {
+    final dev = _internetP2PTransport.addPeerFromLinkOrTicket(
+      rawLink,
+      fallbackName: fallbackName,
+    );
+    if (dev != null) {
+      notifyListeners();
+    }
+    return dev;
+  }
   bool get isDiscovering => _discovering;
   OutgoingTransferState get outgoingState => _outgoingState;
   IncomingTransferState get incomingState => _incomingState;
@@ -157,6 +194,12 @@ class TransferCoordinator extends ChangeNotifier {
       await _quickShareTransport.start();
     }
     await _tapProximityTransport.start();
+    if (settings.internetP2pEnabled) {
+      await _internetP2PTransport.start();
+    }
+    if (launch.initialDeepLink != null && launch.initialDeepLink!.isNotEmpty) {
+      connectIrohLink(launch.initialDeepLink!);
+    }
 
     await startDiscovery();
     notifyListeners();
@@ -172,6 +215,7 @@ class TransferCoordinator extends ChangeNotifier {
       settings.quickShareEnabled,
       discoverIfActive: _discovering,
     );
+    await _internetP2PTransport.setEnabled(settings.internetP2pEnabled);
     _router.pruneSelfDevices();
     notifyListeners();
   }
@@ -209,6 +253,11 @@ class TransferCoordinator extends ChangeNotifier {
       return device.instanceId != null &&
           device.instanceId!.toUpperCase() ==
               _tapProximityTransport.localEphemeralHex;
+    }
+    if (device.channelId == 'internet_p2p' ||
+        device.protocol == TransferProtocol.internetP2p) {
+      return _internetP2PTransport.nodeId.isNotEmpty &&
+          device.endpointId == _internetP2PTransport.nodeId;
     }
     if (device.channelId == 'lan' &&
         device.tlsFingerprint != null &&

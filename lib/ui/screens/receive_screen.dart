@@ -135,6 +135,54 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                   value: '$qsPort',
                 ),
               ],
+              if (widget.settings.internetP2pEnabled &&
+                  widget.coordinator.isIrohReady) ...[
+                const Divider(height: 1, indent: 16, endIndent: 16),
+                Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 18,
+                    vertical: 10,
+                  ),
+                  child: Row(
+                    children: [
+                      Text(
+                        strings.tr('p2p_link_label'),
+                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                              color: scheme.onSurfaceVariant,
+                            ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Text(
+                          widget.coordinator.localIrohDeepLink,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          textAlign: TextAlign.end,
+                          style: Theme.of(context)
+                              .textTheme
+                              .bodySmall
+                              ?.copyWith(fontWeight: FontWeight.w600),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      IconButton(
+                        tooltip: 'Copy',
+                        icon: const Icon(Icons.copy_rounded, size: 18),
+                        onPressed: () {
+                          PlatformBridge.instance.copyTextToClipboard(
+                            widget.coordinator.localIrohDeepLink,
+                          );
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text(strings.tr('p2p_link_copied')),
+                            ),
+                          );
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+              ],
             ],
           ),
         ),
@@ -187,11 +235,15 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                 ),
                 Chip(
                   label: Text(
-                    offer.protocol == TransferProtocol.quickShare
-                        ? strings.tr('protocol_quickshare')
-                        : (offer.protocol == TransferProtocol.tapProximity
-                            ? strings.tr('protocol_tap')
-                            : strings.tr('protocol_direct')),
+                    switch (offer.protocol) {
+                      TransferProtocol.quickShare =>
+                        strings.tr('protocol_quickshare'),
+                      TransferProtocol.tapProximity =>
+                        strings.tr('protocol_tap'),
+                      TransferProtocol.internetP2p =>
+                        strings.tr('protocol_iroh'),
+                      _ => strings.tr('protocol_direct'),
+                    },
                   ),
                 ),
               ],

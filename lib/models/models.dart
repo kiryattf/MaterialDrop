@@ -1,6 +1,6 @@
 import 'dart:convert';
 
-enum TransferProtocol { materialDrop, lan, quickShare, tapProximity }
+enum TransferProtocol { materialDrop, lan, quickShare, tapProximity, internetP2p }
 
 enum DeviceKind { pc, phone, tablet, usb, unknown }
 
@@ -23,6 +23,7 @@ class NearbyDevice {
   final bool useHttps;
   final int? rssi;
   final String? proximityZone;
+  final String? irohTicket;
   final DateTime lastSeen;
 
   const NearbyDevice({
@@ -41,6 +42,7 @@ class NearbyDevice {
     this.useHttps = false,
     this.rssi,
     this.proximityZone,
+    this.irohTicket,
   });
 
   NearbyDevice copyWith({
@@ -58,6 +60,7 @@ class NearbyDevice {
     bool? useHttps,
     int? rssi,
     String? proximityZone,
+    String? irohTicket,
     DateTime? lastSeen,
   }) {
     return NearbyDevice(
@@ -75,6 +78,7 @@ class NearbyDevice {
       useHttps: useHttps ?? this.useHttps,
       rssi: rssi ?? this.rssi,
       proximityZone: proximityZone ?? this.proximityZone,
+      irohTicket: irohTicket ?? this.irohTicket,
       lastSeen: lastSeen ?? this.lastSeen,
     );
   }
@@ -111,11 +115,13 @@ class ShareLaunchPayload {
   final bool isShareSheet;
   final List<StagedFile> files;
   final String? sharedText;
+  final String? deepLink;
 
   const ShareLaunchPayload({
     required this.isShareSheet,
     required this.files,
     this.sharedText,
+    this.deepLink,
   });
 }
 

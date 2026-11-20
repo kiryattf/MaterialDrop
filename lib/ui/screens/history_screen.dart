@@ -306,12 +306,15 @@ class _HistoryTile extends StatelessWidget {
                             borderRadius: BorderRadius.circular(999),
                           ),
                           child: Text(
-                            entry.protocol == TransferProtocol.quickShare
-                                ? strings.tr('protocol_quickshare')
-                                : (entry.protocol ==
-                                        TransferProtocol.tapProximity
-                                    ? strings.tr('protocol_tap')
-                                    : strings.tr('protocol_direct')),
+                            switch (entry.protocol) {
+                              TransferProtocol.quickShare =>
+                                strings.tr('protocol_quickshare'),
+                              TransferProtocol.tapProximity =>
+                                strings.tr('protocol_tap'),
+                              TransferProtocol.internetP2p =>
+                                strings.tr('protocol_iroh'),
+                              _ => strings.tr('protocol_direct'),
+                            },
                             style: textTheme.labelSmall?.copyWith(
                               color: scheme.onSurfaceVariant,
                             ),

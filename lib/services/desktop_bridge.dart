@@ -61,11 +61,14 @@ class DesktopBridge {
 
   final StreamController<String> _trayActions =
       StreamController<String>.broadcast();
+  final StreamController<String> _deepLinks =
+      StreamController<String>.broadcast();
   bool _handlerBound = false;
 
   bool get isDesktop => Platform.isWindows || Platform.isLinux;
 
   Stream<String> get trayActionStream => _trayActions.stream;
+  Stream<String> get deepLinkStream => _deepLinks.stream;
 
   void _ensureHandler() {
     if (_handlerBound || !isDesktop) return;
@@ -76,8 +79,21 @@ class DesktopBridge {
         if (action.isNotEmpty) {
           _trayActions.add(action);
         }
+      } else if (call.method == 'onDeepLink') {
+        final url = call.arguments as String? ?? '';
+        if (url.isNotEmpty) {
+          _deepLinks.add(url);
+        }
       }
     });
+  }
+
+  Future<void> registerUrlProtocol() async {
+    if (!isDesktop) return;
+    _ensureHandler();
+    try {
+      await _channel.invokeMethod('registerUrlProtocol');
+    } catch (_) {}
   }
 
   Future<void> initTray({

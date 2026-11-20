@@ -140,7 +140,33 @@ class PlatformBridge {
       isShareSheet: map['isShareSheet'] as bool? ?? false,
       files: files,
       sharedText: map['sharedText'] as String?,
+      deepLink: map['deepLink'] as String?,
     );
+  }
+
+  Future<bool> shareViaSystemQuickShare(
+    List<StagedFile> files, {
+    String? text,
+  }) async {
+    if (!Platform.isAndroid || (files.isEmpty && (text == null || text.isEmpty))) {
+      return false;
+    }
+    try {
+      final res = await _method.invokeMethod<bool>('shareViaSystemQuickShare', {
+        'files': files
+            .map((f) => {
+                  'path': f.path,
+                  'uri': f.contentUri,
+                  'name': f.name,
+                  'mimeType': f.mimeType,
+                })
+            .toList(),
+        'text': text,
+      });
+      return res ?? false;
+    } catch (_) {
+      return false;
+    }
   }
 
   /// Streams a [StagedFile] in 64 KiB chunks without loading it into memory.

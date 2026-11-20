@@ -15,6 +15,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native/materialdrop_rust
+
+      - run: cargo test --manifest-path native/materialdrop_rust/Cargo.toml
+
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.50.0'
@@ -37,6 +45,16 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native/materialdrop_rust
+
+      - uses: taiki-e/install-action@cargo-ndk
+
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.50.0'
@@ -44,6 +62,18 @@ jobs:
           cache: true
 
       - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build Rust Android FFI libraries
+        shell: bash
+        run: |
+          SDK_ROOT="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          NDK_DIR=$(ls -d "$SDK_ROOT/ndk/"* 2>/dev/null | sort -V | tail -n1)
+          if [ -z "$NDK_DIR" ]; then
+            yes | "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --install "ndk;27.0.12077973"
+            NDK_DIR="$SDK_ROOT/ndk/27.0.12077973"
+          fi
+          export ANDROID_NDK_HOME="$NDK_DIR"
+          cargo ndk -t armeabi-v7a -t arm64-v8a -t x86_64 -o android/app/src/main/jniLibs build --manifest-path native/materialdrop_rust/Cargo.toml --release
 
       - run: flutter pub get
       - run: flutter build apk --release
@@ -60,6 +90,16 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native/materialdrop_rust
+
+      - run: cargo build --manifest-path native/materialdrop_rust/Cargo.toml --release
 
       - uses: subosito/flutter-action@v2
         with:
@@ -93,6 +133,16 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev liblzma-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native/materialdrop_rust
+
+      - run: cargo build --manifest-path native/materialdrop_rust/Cargo.toml --release
 
       - uses: subosito/flutter-action@v2
         with:

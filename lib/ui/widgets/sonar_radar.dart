@@ -196,7 +196,8 @@ class _SonarRadarState extends State<SonarRadar> with TickerProviderStateMixin {
                   ),
                   if (device.isUsb ||
                       device.protocol == TransferProtocol.quickShare ||
-                      device.protocol == TransferProtocol.tapProximity)
+                      device.protocol == TransferProtocol.tapProximity ||
+                      device.protocol == TransferProtocol.internetP2p)
                     Positioned(
                       right: -4,
                       top: -4,
@@ -215,9 +216,15 @@ class _SonarRadarState extends State<SonarRadar> with TickerProviderStateMixin {
                         child: Icon(
                           device.isUsb
                               ? Icons.usb_rounded
-                              : (device.protocol == TransferProtocol.quickShare
-                                  ? Icons.bolt_rounded
-                                  : Icons.sensors_rounded),
+                              : switch (device.protocol) {
+                                  TransferProtocol.quickShare =>
+                                    Icons.bolt_rounded,
+                                  TransferProtocol.tapProximity =>
+                                    Icons.sensors_rounded,
+                                  TransferProtocol.internetP2p =>
+                                    Icons.public_rounded,
+                                  _ => Icons.wifi_rounded,
+                                },
                           size: 12,
                           color: device.isUsb
                               ? scheme.onTertiaryContainer

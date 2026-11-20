@@ -138,6 +138,24 @@ std::optional<LRESULT> DesktopBridge::HandleWindowMessage(HWND hwnd,
     return 0;
   }
 
+  if (message == WM_COPYDATA && lparam != 0) {
+    const auto* cds = reinterpret_cast<const COPYDATASTRUCT*>(lparam);
+    if (cds->dwData == kDeepLinkCopyDataTag && cds->lpData != nullptr &&
+        cds->cbData > 0) {
+      std::string url(static_cast<const char*>(cds->lpData),
+                      strnlen(static_cast<const char*>(cds->lpData), cds->cbData));
+      ShowWindow(hwnd_, SW_SHOW);
+      ShowWindow(hwnd_, SW_RESTORE);
+      SetForegroundWindow(hwnd_);
+      if (!url.empty() && channel_) {
+        channel_->InvokeMethod(
+            "onDeepLink",
+            std::make_unique<flutter::EncodableValue>(url));
+      }
+      return 1;
+    }
+  }
+
   if (message == kBlePeerMessage) {
     std::unique_ptr<BlePeerDiscoveryWin> peer(
         reinterpret_cast<BlePeerDiscoveryWin*>(lparam));
@@ -270,6 +288,44 @@ void DesktopBridge::HandleMethodCall(
     Cleanup();
     result->Success(flutter::EncodableValue(true));
     PostMessage(hwnd_, WM_CLOSE, 0, 0);
+    return;
+  }
+
+  if (method == "registerUrlProtocol") {
+    wchar_t exe_path[MAX_PATH] = {};
+    DWORD len = GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
+    bool reg_ok = false;
+    if (len > 0 && len < MAX_PATH) {
+      HKEY hRoot = nullptr;
+      if (RegCreateKeyExW(HKEY_CURRENT_USER,
+                          L"Software\\Classes\\materialdrop", 0, nullptr, 0,
+                          KEY_SET_VALUE, nullptr, &hRoot,
+                          nullptr) == ERROR_SUCCESS) {
+        const wchar_t* desc = L"URL:MaterialDrop P2P Protocol";
+        RegSetValueExW(hRoot, nullptr, 0, REG_SZ,
+                       reinterpret_cast<const BYTE*>(desc),
+                       static_cast<DWORD>((wcslen(desc) + 1) * sizeof(wchar_t)));
+        RegSetValueExW(hRoot, L"URL Protocol", 0, REG_SZ,
+                       reinterpret_cast<const BYTE*>(L""), sizeof(wchar_t));
+        RegCloseKey(hRoot);
+
+        HKEY hCmd = nullptr;
+        if (RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                L"Software\\Classes\\materialdrop\\shell\\open\\command", 0,
+                nullptr, 0, KEY_SET_VALUE, nullptr, &hCmd,
+                nullptr) == ERROR_SUCCESS) {
+          std::wstring cmd = std::wstring(L"\"") + exe_path + L"\" \"%1\"";
+          reg_ok = RegSetValueExW(
+                       hCmd, nullptr, 0, REG_SZ,
+                       reinterpret_cast<const BYTE*>(cmd.c_str()),
+                       static_cast<DWORD>((cmd.size() + 1) *
+                                          sizeof(wchar_t))) == ERROR_SUCCESS;
+          RegCloseKey(hCmd);
+        }
+      }
+    }
+    result->Success(flutter::EncodableValue(reg_ok));
     return;
   }
 

@@ -403,6 +403,39 @@ static void desktop_method_call_handler(FlMethodChannel* channel,
     }
     response = FL_METHOD_RESPONSE(
         fl_method_success_response_new(fl_value_new_bool(ok)));
+  } else if (g_strcmp0(method, "registerUrlProtocol") == 0) {
+    char exe_buf[4096] = {};
+    ssize_t n = readlink("/proc/self/exe", exe_buf, sizeof(exe_buf) - 1);
+    bool ok = false;
+    if (n > 0) {
+      exe_buf[n] = '\0';
+      const gchar* data_home = g_get_user_data_dir();
+      g_autofree gchar* apps_dir =
+          g_build_filename(data_home, "applications", nullptr);
+      g_mkdir_with_parents(apps_dir, 0755);
+      g_autofree gchar* desktop_path =
+          g_build_filename(apps_dir, "dev.materialdrop.flutter.desktop", nullptr);
+      g_autofree gchar* content = g_strdup_printf(
+          "[Desktop Entry]\n"
+          "Type=Application\n"
+          "Name=MaterialDrop\n"
+          "Exec=\"%s\" %%u\n"
+          "Terminal=false\n"
+          "NoDisplay=true\n"
+          "MimeType=x-scheme-handler/materialdrop;\n",
+          exe_buf);
+      g_autoptr(GError) err = nullptr;
+      if (g_file_set_contents(desktop_path, content, -1, &err)) {
+        const gchar* argv[] = {"xdg-mime", "default",
+                               "dev.materialdrop.flutter.desktop",
+                               "x-scheme-handler/materialdrop", nullptr};
+        g_spawn_async(nullptr, const_cast<gchar**>(argv), nullptr,
+                      G_SPAWN_SEARCH_PATH, nullptr, nullptr, nullptr, nullptr);
+        ok = true;
+      }
+    }
+    response = FL_METHOD_RESPONSE(
+        fl_method_success_response_new(fl_value_new_bool(ok)));
   } else if (g_strcmp0(method, "quitApp") == 0) {
     self->quitting = true;
     response = FL_METHOD_RESPONSE(

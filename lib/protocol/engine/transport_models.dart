@@ -17,6 +17,7 @@ class TransportEndpoint {
   final String? instanceId;
   final int? rssi;
   final String? proximityZone;
+  final String? irohTicket;
 
   const TransportEndpoint({
     required this.channelId,
@@ -32,6 +33,7 @@ class TransportEndpoint {
     this.instanceId,
     this.rssi,
     this.proximityZone,
+    this.irohTicket,
   });
 
   NearbyDevice toNearbyDevice({
@@ -56,6 +58,7 @@ class TransportEndpoint {
       useHttps: useHttps,
       rssi: rssi,
       proximityZone: proximityZone,
+      irohTicket: irohTicket,
     );
   }
 }

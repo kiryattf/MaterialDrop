@@ -2,6 +2,8 @@ package dev.materialdrop.material_drop
 
 import android.Manifest
 import android.app.DownloadManager
+import android.content.ClipData
+import android.content.ComponentName
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
@@ -484,6 +486,17 @@ class MainActivity : FlutterActivity() {
                         result.success(true)
                     }
 
+                    "shareViaSystemQuickShare" -> {
+                        val items = call.argument<List<Map<String, Any?>>>("files") ?: emptyList()
+                        val text = call.argument<String>("text")
+                        try {
+                            val launched = launchSystemQuickShare(items, text)
+                            result.success(launched)
+                        } catch (e: Exception) {
+                            result.error("QUICKSHARE_INTENT_FAILED", e.message, null)
+                        }
+                    }
+
                     "finishActivity" -> {
                         finish()
                         result.success(true)
@@ -540,6 +553,18 @@ class MainActivity : FlutterActivity() {
     private fun parseShareIntent(intent: Intent?): Map<String, Any?>? {
         if (intent == null) return null
         val action = intent.action
+        if (action == Intent.ACTION_VIEW) {
+            val data = intent.data
+            if (data != null && data.scheme.equals("materialdrop", ignoreCase = true)) {
+                return mapOf(
+                    "isShareSheet" to false,
+                    "files" to emptyList<Map<String, Any?>>(),
+                    "sharedText" to null,
+                    "deepLink" to data.toString()
+                )
+            }
+            return null
+        }
         if (action != Intent.ACTION_SEND && action != Intent.ACTION_SEND_MULTIPLE) {
             return null
         }
@@ -594,6 +619,94 @@ class MainActivity : FlutterActivity() {
             "files" to fileMaps,
             "sharedText" to sharedText
         )
+    }
+
+    private fun launchSystemQuickShare(
+        items: List<Map<String, Any?>>,
+        text: String?
+    ): Boolean {
+        val uris = ArrayList<Uri>()
+        var firstMime = "*/*"
+        for ((idx, item) in items.withIndex()) {
+            val path = item["path"] as? String
+            val uriStr = item["uri"] as? String
+            val mime = item["mimeType"] as? String
+            if (idx == 0 && !mime.isNullOrEmpty()) {
+                firstMime = mime
+            } else if (mime != null && mime != firstMime) {
+                firstMime = "*/*"
+            }
+            val uri = when {
+                !uriStr.isNullOrEmpty() -> Uri.parse(uriStr)
+                !path.isNullOrEmpty() -> {
+                    val file = File(path)
+                    if (file.exists()) {
+                        FileProvider.getUriForFile(this, "$packageName.files", file)
+                    } else null
+                }
+                else -> null
+            }
+            if (uri != null) {
+                uris.add(uri)
+            }
+        }
+
+        if (uris.isEmpty() && text.isNullOrEmpty()) return false
+
+        val shareIntent = if (uris.size <= 1) {
+            Intent(Intent.ACTION_SEND).apply {
+                type = if (uris.isEmpty()) "text/plain" else firstMime
+                if (uris.isNotEmpty()) {
+                    putExtra(Intent.EXTRA_STREAM, uris[0])
+                    clipData = ClipData.newRawUri("MaterialDrop", uris[0])
+                }
+                if (!text.isNullOrEmpty()) {
+                    putExtra(Intent.EXTRA_TEXT, text)
+                }
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+        } else {
+            Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+                type = firstMime
+                putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+                val cd = ClipData.newRawUri("MaterialDrop", uris[0])
+                for (k in 1 until uris.size) {
+                    cd.addItem(ClipData.Item(uris[k]))
+                }
+                clipData = cd
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+        }
+
+        val resolved = packageManager.queryIntentActivities(shareIntent, PackageManager.MATCH_DEFAULT_ONLY)
+        val gmsTarget = resolved.firstOrNull { info ->
+            val pkg = info.activityInfo.packageName
+            val cls = info.activityInfo.name.lowercase()
+            pkg == "com.google.android.gms" &&
+                (cls.contains("nearby") || cls.contains("quickshare") || cls.contains("share"))
+        } ?: resolved.firstOrNull { info ->
+            info.activityInfo.packageName == "com.google.android.gms"
+        }
+
+        if (gmsTarget != null) {
+            val direct = Intent(shareIntent).apply {
+                component = ComponentName(gmsTarget.activityInfo.packageName, gmsTarget.activityInfo.name)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            try {
+                startActivity(direct)
+                return true
+            } catch (_: Exception) {}
+        }
+
+        val chooser = Intent.createChooser(shareIntent, "Quick Share")
+        chooser.putExtra(
+            Intent.EXTRA_EXCLUDE_COMPONENTS,
+            arrayOf(ComponentName(this, MainActivity::class.java))
+        )
+        chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        startActivity(chooser)
+        return true
     }
 
     private fun queryUriMetadata(uri: Uri): Map<String, Any?>? {

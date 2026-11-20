@@ -24,6 +24,9 @@ Future<void> main(List<String> args) async {
   await coordinator.startServices();
 
   final initialShareRaw = await PlatformBridge.instance.getInitialSharedFiles();
+  if (initialShareRaw?.deepLink != null && initialShareRaw!.deepLink!.isNotEmpty) {
+    coordinator.connectIrohLink(initialShareRaw.deepLink!);
+  }
   final initialShare = await _normalizeSharePayload(initialShareRaw);
   unawaited(PlatformBridge.instance.requestNotificationPermission());
 
@@ -83,6 +86,7 @@ class _MaterialDropRootState extends State<MaterialDropRoot>
   ShareLaunchPayload? _shareLaunch;
   StreamSubscription<ShareLaunchPayload>? _shareSub;
   StreamSubscription<String>? _traySub;
+  StreamSubscription<String>? _deepLinkSub;
   String? _lastNotifiedOfferId;
   String? _lastCompletedOfferId;
   String? _lastWindowTitle;
@@ -93,6 +97,9 @@ class _MaterialDropRootState extends State<MaterialDropRoot>
     _shareLaunch = widget.initialShare;
     WidgetsBinding.instance.addObserver(this);
     _shareSub = PlatformBridge.instance.shareIntentStream.listen((payload) async {
+      if (payload.deepLink != null && payload.deepLink!.isNotEmpty) {
+        widget.coordinator.connectIrohLink(payload.deepLink!);
+      }
       final normalized = await _normalizeSharePayload(payload);
       if (mounted && normalized != null) {
         setState(() {
@@ -125,6 +132,7 @@ class _MaterialDropRootState extends State<MaterialDropRoot>
   }
 
   void _initDesktopLifecycle() {
+    unawaited(DesktopBridge.instance.registerUrlProtocol());
     unawaited(
       DesktopBridge.instance.initTray(
         labels: _buildTrayLabels(),
@@ -136,6 +144,10 @@ class _MaterialDropRootState extends State<MaterialDropRoot>
     );
     _syncWindowTitle();
     _traySub = DesktopBridge.instance.trayActionStream.listen(_handleTrayAction);
+    _deepLinkSub = DesktopBridge.instance.deepLinkStream.listen((link) {
+      widget.coordinator.connectIrohLink(link);
+      unawaited(DesktopBridge.instance.showWindow());
+    });
   }
 
   void _syncWindowTitle() {
@@ -247,6 +259,7 @@ class _MaterialDropRootState extends State<MaterialDropRoot>
     widget.coordinator.removeListener(_onCoordinatorUpdated);
     unawaited(_traySub?.cancel());
     unawaited(_shareSub?.cancel());
+    unawaited(_deepLinkSub?.cancel());
     widget.coordinator.dispose();
     super.dispose();
   }

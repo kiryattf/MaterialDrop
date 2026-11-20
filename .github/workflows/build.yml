@@ -68,13 +68,22 @@ jobs:
       - name: Build Rust Android FFI libraries
         shell: bash
         run: |
-          SDK_ROOT="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
-          NDK_DIR=$(ls -d "$SDK_ROOT/ndk/"* 2>/dev/null | sort -V | tail -n1)
-          if [ -z "$NDK_DIR" ]; then
-            yes | "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --install "ndk;27.0.12077973"
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          NDK_DIR="${ANDROID_NDK_HOME:-${ANDROID_NDK_LATEST_HOME:-}}"
+          if [ -z "$NDK_DIR" ] || [ ! -d "$NDK_DIR" ]; then
+            if [ -d "$SDK_ROOT/ndk" ]; then
+              NDK_DIR="$(find "$SDK_ROOT/ndk" -maxdepth 1 -mindepth 1 -type d | sort -V | tail -n1 || true)"
+            fi
+          fi
+          if [ -z "$NDK_DIR" ] || [ ! -d "$NDK_DIR" ]; then
+            SDKMGR="$(find "$SDK_ROOT/cmdline-tools" -name sdkmanager -type f 2>/dev/null | head -n1 || true)"
+            { yes || true; } | "$SDKMGR" --licenses >/dev/null 2>&1 || true
+            "$SDKMGR" --install "ndk;27.0.12077973"
             NDK_DIR="$SDK_ROOT/ndk/27.0.12077973"
           fi
           export ANDROID_NDK_HOME="$NDK_DIR"
+          echo "Using ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+          mkdir -p android/app/src/main/jniLibs
           cargo ndk -t armeabi-v7a -t arm64-v8a -t x86_64 -o android/app/src/main/jniLibs build --manifest-path native/materialdrop_rust/Cargo.toml --release
 
       - run: flutter pub get

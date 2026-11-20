@@ -208,8 +208,27 @@ class PlatformBridge {
         return dir.path;
       }
     } catch (_) {}
-    final appDir = await getApplicationDocumentsDirectory();
-    final fallback = Directory(p.join(appDir.path, 'MaterialDrop'));
+    if (Platform.isLinux) {
+      final xdg = Platform.environment['XDG_DOWNLOAD_DIR'];
+      if (xdg != null && xdg.isNotEmpty) {
+        final dir = Directory(p.join(xdg, 'MaterialDrop'));
+        await dir.create(recursive: true);
+        return dir.path;
+      }
+      final home = Platform.environment['HOME'];
+      if (home != null && home.isNotEmpty) {
+        final dir = Directory(p.join(home, 'Downloads', 'MaterialDrop'));
+        await dir.create(recursive: true);
+        return dir.path;
+      }
+    }
+    Directory baseDir;
+    try {
+      baseDir = await getApplicationDocumentsDirectory();
+    } catch (_) {
+      baseDir = Directory.systemTemp;
+    }
+    final fallback = Directory(p.join(baseDir.path, 'MaterialDrop'));
     await fallback.create(recursive: true);
     return fallback.path;
   }

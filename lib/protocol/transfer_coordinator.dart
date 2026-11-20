@@ -7,124 +7,102 @@ import '../models/models.dart';
 import '../services/platform_bridge.dart';
 import '../services/settings_controller.dart';
 import '../services/sound_service.dart';
+import 'direct/direct_transport.dart';
 import 'direct/md_constants.dart';
-import 'direct/md_discovery.dart';
-import 'direct/md_receiver.dart';
-import 'direct/md_sender.dart';
-import 'quickshare/proto_codec.dart';
-import 'quickshare/qs_mdns_service.dart';
-import 'quickshare/qs_receiver.dart';
-import 'quickshare/qs_sender.dart';
+import 'engine/transport_models.dart';
+import 'engine/transport_router.dart';
+import 'lan/lan_constants.dart';
+import 'lan/lan_transport.dart';
+import 'quickshare/quickshare_transport.dart';
 
 class TransferCoordinator extends ChangeNotifier {
   final SettingsController settings;
 
-  late final MaterialDropDiscovery _mdDiscovery;
-  late final QsMdnsService _qsMdns;
-  late final MaterialDropReceiver _mdReceiver;
-  late final QsReceiver _qsReceiver;
-  final MaterialDropSender _mdSender = MaterialDropSender();
-  final QsSender _qsSender = QsSender();
+  late final DirectTransport _directTransport;
+  late final LanTransport _lanTransport;
+  late final QuickShareTransport _quickShareTransport;
+  late final TransportRouter _router;
 
-  final Map<String, NearbyDevice> _devicesById = {};
+  StreamSubscription<List<DiscoveredPeer>>? _peersSub;
+  StreamSubscription<TransportEvent>? _eventsSub;
+
+  Set<String> _knownPeerKeys = {};
   List<String> _localIps = [];
   Set<String> _allOwnIps = {'127.0.0.1', '0.0.0.0'};
   late final String _instanceId =
       '${DateTime.now().microsecondsSinceEpoch.toRadixString(16)}_${math.Random.secure().nextInt(0x7fffffff).toRadixString(16)}';
+
   bool _servicesStarted = false;
+  bool _discovering = false;
   bool _isRadarVisible = false;
 
   OutgoingTransferState _outgoingState = const OutgoingIdle();
   IncomingTransferState _incomingState = const IncomingIdle();
-  TransferProtocol? _activeIncomingProtocol;
-  TransferProtocol? _activeOutgoingProtocol;
-
+  String? _activeIncomingChannelId;
+  String? _activeIncomingOfferId;
   Timer? _autoResetOutgoingTimer;
 
   TransferCoordinator({required this.settings}) {
     final launch = settings.launchConfig;
-    _mdDiscovery = MaterialDropDiscovery(
+
+    _directTransport = DirectTransport(
       instanceId: _instanceId,
       multiInstance: launch.isMultiInstance,
-      deviceNameFn: () => settings.deviceName,
-      localPortFn: () => _mdReceiver.port > 0
-          ? _mdReceiver.port
-          : (launch.port ?? MdConstants.localHttpPort),
-      onDeviceFound: _onDeviceDiscovered,
-      onDeviceExpired: _onDeviceRemoved,
-    );
-
-    _qsMdns = QsMdnsService(
-      onDeviceFound: _onDeviceDiscovered,
-      onDeviceLost: (instanceName) {
-        // Expire matching QS device if found
-        final toRemove = _devicesById.values
-            .where((d) =>
-                d.protocol == TransferProtocol.quickShare &&
-                d.id.endsWith(instanceName))
-            .map((d) => d.id)
-            .toList();
-        for (final id in toRemove) {
-          _onDeviceRemoved(id);
-        }
-      },
-    );
-
-    _mdReceiver = MaterialDropReceiver(
-      instanceId: _instanceId,
       deviceName: settings.deviceName,
       downloadDir: settings.downloadDir,
       treatLoopbackAsUsb: !launch.isMultiInstance,
       isTrustedFn: (name, ip) => settings.isTrusted(name, ip),
       autoAcceptAllFn: () => settings.autoAcceptAll,
       autoAcceptTrustedFn: () => settings.autoAcceptTrusted,
-      onOffer: (offer) => _handleIncomingOffer(offer, TransferProtocol.materialDrop),
-      onProgress: _handleIncomingProgress,
-      onCompleted: (offer, item) =>
-          _handleIncomingCompleted(offer, [item], const []),
-      onCanceled: _handleIncomingCanceled,
-      onError: _handleIncomingError,
     );
 
-    _qsReceiver = QsReceiver(
+    _lanTransport = LanTransport(
       deviceName: settings.deviceName,
       downloadDir: settings.downloadDir,
+      multiInstance: launch.isMultiInstance,
       isTrustedFn: (name, ip) => settings.isTrusted(name, ip),
       autoAcceptAllFn: () => settings.autoAcceptAll,
       autoAcceptTrustedFn: () => settings.autoAcceptTrusted,
-      onOffer: (offer) => _handleIncomingOffer(offer, TransferProtocol.quickShare),
-      onProgress: _handleIncomingProgress,
-      onCompleted: _handleIncomingCompleted,
-      onCanceled: _handleIncomingCanceled,
-      onError: _handleIncomingError,
     );
+
+    _quickShareTransport = QuickShareTransport(
+      deviceName: settings.deviceName,
+      downloadDir: settings.downloadDir,
+      enabled: settings.quickShareEnabled,
+      isTrustedFn: (name, ip) => settings.isTrusted(name, ip),
+      autoAcceptAllFn: () => settings.autoAcceptAll,
+      autoAcceptTrustedFn: () => settings.autoAcceptTrusted,
+      declinedMessageFn: () => settings.strings.tr('transfer_declined'),
+    );
+
+    _router = TransportRouter(
+      channels: [
+        _directTransport,
+        _lanTransport,
+        _quickShareTransport,
+      ],
+      isSelfFn: _isSelfDevice,
+      isTrustedFn: settings.isDeviceTrusted,
+    );
+
+    _peersSub = _router.peersStream.listen(_onPeersUpdated);
+    _eventsSub = _router.eventsStream.listen(_onTransportEvent);
   }
 
-  List<NearbyDevice> get devices {
-    final list = _devicesById.values.toList();
-    list.sort((a, b) {
-      final aTrust = settings.isDeviceTrusted(a) ? 0 : 1;
-      final bTrust = settings.isDeviceTrusted(b) ? 0 : 1;
-      if (aTrust != bTrust) return aTrust.compareTo(bTrust);
-
-      final aUsb = a.isUsb ? 0 : 1;
-      final bUsb = b.isUsb ? 0 : 1;
-      if (aUsb != bUsb) return aUsb.compareTo(bUsb);
-
-      if (a.protocol != b.protocol) {
-        return a.protocol == TransferProtocol.materialDrop ? -1 : 1;
-      }
-      return a.name.toLowerCase().compareTo(b.name.toLowerCase());
-    });
-    return list;
-  }
-
+  List<NearbyDevice> get devices => _router.sortedNearbyDevices();
+  List<DiscoveredPeer> get peers => _router.currentPeers;
   List<String> get localIps => List.unmodifiable(_localIps);
-  int get directPort => _mdReceiver.port > 0
-      ? _mdReceiver.port
+
+  int get directPort => _directTransport.boundPort > 0
+      ? _directTransport.boundPort
       : (settings.launchConfig.port ?? MdConstants.localHttpPort);
-  int get quickSharePort => _qsReceiver.port;
-  bool get isDiscovering => _mdDiscovery.isScanning;
+
+  int get lanPort => _lanTransport.boundPort > 0
+      ? _lanTransport.boundPort
+      : LanConstants.defaultPort;
+
+  int get quickSharePort => _quickShareTransport.boundPort;
+  bool get isDiscovering => _discovering;
   OutgoingTransferState get outgoingState => _outgoingState;
   IncomingTransferState get incomingState => _incomingState;
 
@@ -140,68 +118,58 @@ class TransferCoordinator extends ChangeNotifier {
     _localIps = await PlatformBridge.instance.getLocalIpv4Addresses();
     _allOwnIps = await PlatformBridge.instance.getAllOwnIpv4Addresses();
 
-    await _mdReceiver.start(
-      explicitPort: settings.launchConfig.port,
-      bindAddress: settings.launchConfig.bindAddress,
+    final launch = settings.launchConfig;
+    await _directTransport.start(
+      explicitPort: launch.port,
+      bindAddress: launch.bindAddress,
+    );
+    await _lanTransport.start(
+      explicitPort: launch.port != null ? launch.port! + 1000 : null,
+      bindAddress: launch.bindAddress,
     );
     if (settings.quickShareEnabled) {
-      await _qsReceiver.start(advertiseMdns: true);
+      await _quickShareTransport.start();
     }
+
     await startDiscovery();
     notifyListeners();
   }
 
   Future<void> onSettingsUpdated() async {
     SoundService.instance.enabled = settings.soundsEnabled;
-    _mdReceiver.deviceName = settings.deviceName;
-    _mdReceiver.downloadDir = settings.downloadDir;
-    _qsReceiver.deviceName = settings.deviceName;
-    _qsReceiver.downloadDir = settings.downloadDir;
-
-    if (settings.quickShareEnabled && !_qsReceiver.isRunning) {
-      await _qsReceiver.start(advertiseMdns: true);
-      if (_mdDiscovery.isScanning) {
-        await _qsMdns.startBrowsing();
-      }
-    } else if (settings.quickShareEnabled && _qsReceiver.isRunning) {
-      await _qsReceiver.updateAdvertisement();
-    } else if (!settings.quickShareEnabled && _qsReceiver.isRunning) {
-      await _qsReceiver.stop();
-      await _qsMdns.stopBrowsing();
-      _devicesById.removeWhere(
-        (_, d) => d.protocol == TransferProtocol.quickShare,
-      );
-    }
+    await _router.updateConfig(
+      deviceName: settings.deviceName,
+      downloadDir: settings.downloadDir,
+    );
+    await _quickShareTransport.setEnabled(
+      settings.quickShareEnabled,
+      discoverIfActive: _discovering,
+    );
+    _router.pruneSelfDevices();
     notifyListeners();
   }
 
   Future<void> startDiscovery() async {
+    _discovering = true;
     _localIps = await PlatformBridge.instance.getLocalIpv4Addresses();
     _allOwnIps = await PlatformBridge.instance.getAllOwnIpv4Addresses();
-    _devicesById.removeWhere((_, d) => _isSelfDevice(d));
-    await _mdDiscovery.startDiscovery();
-    if (settings.quickShareEnabled) {
-      await _qsMdns.startBrowsing();
-    }
+    _router.pruneSelfDevices();
+    await _router.startDiscovery();
     notifyListeners();
   }
 
   Future<void> stopDiscovery() async {
-    await _mdDiscovery.stopDiscovery();
-    await _qsMdns.stopBrowsing();
-    _devicesById.clear();
+    _discovering = false;
+    await _router.stopDiscovery();
+    _knownPeerKeys.clear();
     notifyListeners();
   }
 
   Future<void> refreshDiscovery() async {
     _localIps = await PlatformBridge.instance.getLocalIpv4Addresses();
     _allOwnIps = await PlatformBridge.instance.getAllOwnIpv4Addresses();
-    _devicesById.removeWhere((_, d) => _isSelfDevice(d));
-    await _mdDiscovery.triggerImmediateRefresh();
-    if (settings.quickShareEnabled) {
-      await _qsMdns.stopBrowsing();
-      await _qsMdns.startBrowsing();
-    }
+    _router.pruneSelfDevices();
+    await _router.refreshDiscovery();
     notifyListeners();
   }
 
@@ -209,6 +177,13 @@ class TransferCoordinator extends ChangeNotifier {
     if (device.instanceId != null && device.instanceId == _instanceId) {
       return true;
     }
+    if (device.channelId == 'lan' &&
+        device.tlsFingerprint != null &&
+        device.tlsFingerprint!.toUpperCase() ==
+            _lanTransport.fingerprint.toUpperCase()) {
+      return true;
+    }
+
     final multi = settings.launchConfig.isMultiInstance;
     if (!device.isUsb) {
       final isOwnIp =
@@ -216,10 +191,14 @@ class TransferCoordinator extends ChangeNotifier {
       if (!multi) {
         return isOwnIp;
       }
-      // In multi-instance mode on the same host, only drop if it matches our own port
       if (isOwnIp &&
           device.protocol == TransferProtocol.materialDrop &&
           device.port == directPort) {
+        return true;
+      }
+      if (isOwnIp &&
+          device.protocol == TransferProtocol.lan &&
+          device.port == lanPort) {
         return true;
       }
       if (isOwnIp &&
@@ -230,8 +209,12 @@ class TransferCoordinator extends ChangeNotifier {
       }
       return false;
     }
+
     if (device.protocol == TransferProtocol.materialDrop &&
         device.port == directPort) {
+      return true;
+    }
+    if (device.protocol == TransferProtocol.lan && device.port == lanPort) {
       return true;
     }
     if (device.protocol == TransferProtocol.quickShare &&
@@ -242,20 +225,113 @@ class TransferCoordinator extends ChangeNotifier {
     return false;
   }
 
-  void _onDeviceDiscovered(NearbyDevice device) {
-    if (_isSelfDevice(device)) return;
-    final isNew = !_devicesById.containsKey(device.id);
-    _devicesById[device.id] = device;
-    if (isNew && _isRadarVisible) {
+  void _onPeersUpdated(List<DiscoveredPeer> peers) {
+    final nextKeys = peers.map((p) => p.peerKey).toSet();
+    final hasNew = nextKeys.any((k) => !_knownPeerKeys.contains(k));
+    _knownPeerKeys = nextKeys;
+    if (hasNew && _isRadarVisible) {
       unawaited(SoundService.instance.play(AppSound.searching));
       unawaited(SoundService.instance.haptic(HapticKind.light));
     }
     notifyListeners();
   }
 
-  void _onDeviceRemoved(String id) {
-    if (_devicesById.remove(id) != null) {
-      notifyListeners();
+  void _onTransportEvent(TransportEvent ev) {
+    switch (ev) {
+      case TransportIncomingOffer(:final channelId, :final offer):
+        _handleIncomingOffer(channelId, offer);
+      case TransportIncomingProgress(
+          :final offer,
+          :final fileName,
+          :final bytesReceived,
+          :final totalBytes,
+          :final speedBps,
+        ):
+        _handleIncomingProgress(
+          offer,
+          fileName,
+          bytesReceived,
+          totalBytes,
+          speedBps,
+        );
+      case TransportIncomingCompleted(
+          :final offer,
+          :final savedItems,
+          :final receivedTexts,
+        ):
+        _handleIncomingCompleted(offer, savedItems, receivedTexts);
+      case TransportIncomingCanceled():
+        _handleIncomingCanceled();
+      case TransportIncomingError(:final message):
+        _handleIncomingError(message);
+      case TransportOutgoingConnecting(:final deviceName, :final protocol):
+        _outgoingState = OutgoingConnecting(
+          deviceName: deviceName,
+          protocol: protocol,
+        );
+        notifyListeners();
+      case TransportOutgoingPinReady(:final deviceName, :final pin):
+        _outgoingState = OutgoingPinReady(deviceName: deviceName, pin: pin);
+        notifyListeners();
+      case TransportOutgoingProgress(
+          :final deviceName,
+          :final fileName,
+          :final bytesSent,
+          :final totalBytes,
+          :final speedBps,
+          :final protocol,
+          :final pin,
+        ):
+        final prog =
+            totalBytes > 0 ? (bytesSent / totalBytes).clamp(0.0, 1.0) : 0.0;
+        _outgoingState = OutgoingTransferring(
+          deviceName: deviceName,
+          fileName: fileName,
+          progress: prog,
+          bytesSent: bytesSent,
+          totalBytes: totalBytes,
+          speedBps: speedBps,
+          protocol: protocol,
+          pin: pin,
+        );
+        notifyListeners();
+      case TransportOutgoingCompleted(
+          :final deviceName,
+          :final displayTitle,
+          :final filesCount,
+          :final protocol,
+          :final files,
+        ):
+        _outgoingState = OutgoingCompleted(
+          deviceName: deviceName,
+          displayTitle: displayTitle,
+          filesCount: filesCount,
+        );
+        unawaited(SoundService.instance.play(AppSound.successful));
+        unawaited(SoundService.instance.haptic(HapticKind.medium));
+        for (final f in files) {
+          unawaited(settings.addHistoryEntry(
+            HistoryEntry(
+              id: '${DateTime.now().microsecondsSinceEpoch}_${f.name}',
+              fileName: f.name,
+              size: f.size,
+              mimeType: f.mimeType,
+              pathOrUri: f.path ?? f.contentUri ?? '',
+              peerName: deviceName,
+              direction: TransferDirection.outgoing,
+              protocol: protocol,
+              timestamp: DateTime.now(),
+            ),
+          ));
+        }
+        notifyListeners();
+      case TransportOutgoingCanceled():
+        _outgoingState = const OutgoingCanceled();
+        notifyListeners();
+      case TransportOutgoingError(:final message):
+        _outgoingState = OutgoingError(message);
+        unawaited(SoundService.instance.play(AppSound.failed));
+        notifyListeners();
     }
   }
 
@@ -266,9 +342,7 @@ class TransferCoordinator extends ChangeNotifier {
   Future<void> sendFiles(NearbyDevice device, List<StagedFile> files) async {
     if (files.isEmpty) return;
     _autoResetOutgoingTimer?.cancel();
-    _activeOutgoingProtocol = device.protocol;
 
-    final totalSize = files.fold<int>(0, (s, f) => s + f.size);
     final displayTitle = files.length == 1
         ? files.first.name
         : '${files.first.name} (+${files.length - 1})';
@@ -288,119 +362,23 @@ class TransferCoordinator extends ChangeNotifier {
     );
 
     try {
-      if (device.protocol == TransferProtocol.materialDrop) {
-        await _mdSender.sendBatch(
-          device: device,
-          localDeviceName: settings.deviceName,
-          files: files,
-          onProgress: (fileName, sent, total, speed) {
-            final denom = total > 0 ? total : totalSize;
-            final prog = denom > 0 ? (sent / denom).clamp(0.0, 1.0) : 0.0;
-            _outgoingState = OutgoingTransferring(
-              deviceName: device.name,
-              fileName: fileName,
-              progress: prog,
-              bytesSent: sent,
-              totalBytes: denom,
-              speedBps: speed,
-              protocol: TransferProtocol.materialDrop,
-            );
-            notifyListeners();
-          },
-        );
-      } else {
-        String? activePin;
-        final result = await _qsSender.sendFiles(
-          device: device,
-          localDeviceName: settings.deviceName,
-          files: files,
-          onPin: (pin) {
-            activePin = pin;
-            _outgoingState = OutgoingPinReady(
-              deviceName: device.name,
-              pin: pin,
-            );
-            notifyListeners();
-          },
-          onProgress: (fileName, sent, total, speed) {
-            final denom = total > 0 ? total : totalSize;
-            final prog = denom > 0 ? (sent / denom).clamp(0.0, 1.0) : 0.0;
-            _outgoingState = OutgoingTransferring(
-              deviceName: device.name,
-              fileName: fileName,
-              progress: prog,
-              bytesSent: sent,
-              totalBytes: denom,
-              speedBps: speed,
-              protocol: TransferProtocol.quickShare,
-              pin: activePin,
-            );
-            notifyListeners();
-          },
-        );
-
-        if (result.userCanceled) {
-          _outgoingState = const OutgoingCanceled();
-          notifyListeners();
-          return;
-        }
-        if (result.receiverCanceled ||
-            result.status == SharingConnectionResponseFrame.statusReject) {
-          _outgoingState =
-              OutgoingError(settings.strings.tr('transfer_declined'));
-          unawaited(SoundService.instance.play(AppSound.failed));
-          notifyListeners();
-          return;
-        }
-        if (!result.isAccepted) {
-          _outgoingState = OutgoingError('Quick Share status ${result.status}');
-          unawaited(SoundService.instance.play(AppSound.failed));
-          notifyListeners();
-          return;
-        }
-      }
-
-      _outgoingState = OutgoingCompleted(
-        deviceName: device.name,
-        displayTitle: displayTitle,
-        filesCount: files.length,
+      await _router.sendFiles(
+        device,
+        files,
+        localDeviceName: settings.deviceName,
       );
-      unawaited(SoundService.instance.play(AppSound.successful));
-      unawaited(SoundService.instance.haptic(HapticKind.medium));
-
-      for (final f in files) {
-        unawaited(settings.addHistoryEntry(
-          HistoryEntry(
-            id: '${DateTime.now().microsecondsSinceEpoch}_${f.name}',
-            fileName: f.name,
-            size: f.size,
-            mimeType: f.mimeType,
-            pathOrUri: f.path ?? f.contentUri ?? '',
-            peerName: device.name,
-            direction: TransferDirection.outgoing,
-            protocol: device.protocol,
-            timestamp: DateTime.now(),
-          ),
-        ));
-      }
-      notifyListeners();
     } catch (e) {
       if (_outgoingState is OutgoingCanceled) return;
       _outgoingState = OutgoingError(e.toString());
       unawaited(SoundService.instance.play(AppSound.failed));
       notifyListeners();
     } finally {
-      _activeOutgoingProtocol = null;
       unawaited(PlatformBridge.instance.stopForegroundTransfer());
     }
   }
 
   void cancelOutgoing() {
-    if (_activeOutgoingProtocol == TransferProtocol.quickShare) {
-      _qsSender.cancel();
-    } else {
-      _mdSender.cancel();
-    }
+    unawaited(_router.cancelOutgoing());
     _outgoingState = const OutgoingCanceled();
     unawaited(PlatformBridge.instance.stopForegroundTransfer());
     notifyListeners();
@@ -415,8 +393,9 @@ class TransferCoordinator extends ChangeNotifier {
   // Incoming transfers
   // ---------------------------------------------------------------------------
 
-  void _handleIncomingOffer(IncomingOffer offer, TransferProtocol protocol) {
-    _activeIncomingProtocol = protocol;
+  void _handleIncomingOffer(String channelId, IncomingOffer offer) {
+    _activeIncomingChannelId = channelId;
+    _activeIncomingOfferId = offer.id;
     final autoAccepted = settings.autoAcceptAll ||
         offer.isUsb ||
         (offer.isTrusted && settings.autoAcceptTrusted);
@@ -452,7 +431,8 @@ class TransferCoordinator extends ChangeNotifier {
     int totalBytes,
     double speedBps,
   ) {
-    final prog = totalBytes > 0 ? (bytesReceived / totalBytes).clamp(0.0, 1.0) : 0.0;
+    final prog =
+        totalBytes > 0 ? (bytesReceived / totalBytes).clamp(0.0, 1.0) : 0.0;
     _incomingState = IncomingReceiving(
       offer: offer,
       currentFileName: fileName,
@@ -474,7 +454,8 @@ class TransferCoordinator extends ChangeNotifier {
       savedItems: items,
       receivedTexts: texts,
     );
-    _activeIncomingProtocol = null;
+    _activeIncomingChannelId = null;
+    _activeIncomingOfferId = null;
     unawaited(PlatformBridge.instance.stopForegroundTransfer());
     unawaited(SoundService.instance.play(AppSound.successful));
     unawaited(SoundService.instance.haptic(HapticKind.medium));
@@ -530,14 +511,16 @@ class TransferCoordinator extends ChangeNotifier {
 
   void _handleIncomingCanceled() {
     _incomingState = const IncomingIdle();
-    _activeIncomingProtocol = null;
+    _activeIncomingChannelId = null;
+    _activeIncomingOfferId = null;
     unawaited(PlatformBridge.instance.stopForegroundTransfer());
     notifyListeners();
   }
 
   void _handleIncomingError(String message) {
     _incomingState = IncomingError(message);
-    _activeIncomingProtocol = null;
+    _activeIncomingChannelId = null;
+    _activeIncomingOfferId = null;
     unawaited(PlatformBridge.instance.stopForegroundTransfer());
     unawaited(SoundService.instance.play(AppSound.failed));
     notifyListeners();
@@ -566,32 +549,32 @@ class TransferCoordinator extends ChangeNotifier {
       notifyListeners();
     }
 
-    if (_activeIncomingProtocol == TransferProtocol.quickShare) {
-      _qsReceiver.setDecision(true);
-    } else {
-      _mdReceiver.setDecision(true);
-    }
+    final channelId = _activeIncomingChannelId ?? 'direct';
+    final offerId = _activeIncomingOfferId ?? '';
+    await _router.acceptIncoming(channelId, offerId);
   }
 
   void declineIncoming() {
-    if (_activeIncomingProtocol == TransferProtocol.quickShare) {
-      _qsReceiver.setDecision(false);
-    } else {
-      _mdReceiver.setDecision(false);
-    }
+    final channelId = _activeIncomingChannelId ?? 'direct';
+    final offerId = _activeIncomingOfferId ?? '';
+    unawaited(_router.declineIncoming(channelId, offerId));
     _incomingState = const IncomingIdle();
-    _activeIncomingProtocol = null;
+    _activeIncomingChannelId = null;
+    _activeIncomingOfferId = null;
     unawaited(PlatformBridge.instance.stopForegroundTransfer());
     unawaited(SoundService.instance.play(AppSound.failed));
     notifyListeners();
   }
 
   Future<void> cancelIncoming() async {
-    if (_activeIncomingProtocol == TransferProtocol.quickShare) {
-      await _qsReceiver.cancelActiveTransfer();
+    final channelId = _activeIncomingChannelId;
+    final offerId = _activeIncomingOfferId;
+    if (channelId != null) {
+      await _router.cancelIncoming(channelId, offerId: offerId);
     }
     _incomingState = const IncomingIdle();
-    _activeIncomingProtocol = null;
+    _activeIncomingChannelId = null;
+    _activeIncomingOfferId = null;
     unawaited(PlatformBridge.instance.stopForegroundTransfer());
     notifyListeners();
   }
@@ -604,11 +587,9 @@ class TransferCoordinator extends ChangeNotifier {
   @override
   void dispose() {
     _autoResetOutgoingTimer?.cancel();
-    unawaited(_mdDiscovery.dispose());
-    unawaited(_qsMdns.dispose());
-    unawaited(_mdReceiver.stop());
-    unawaited(_qsReceiver.stop());
+    unawaited(_peersSub?.cancel());
+    unawaited(_eventsSub?.cancel());
+    unawaited(_router.dispose());
     super.dispose();
   }
 }
-

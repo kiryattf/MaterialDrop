@@ -88,6 +88,27 @@ DesktopBridge::DesktopBridge(HWND hwnd, flutter::BinaryMessenger* messenger)
                  result) {
         HandleMethodCall(call, std::move(result));
       });
+
+  proximity_channel_ =
+      std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+          messenger, "dev.materialdrop.flutter/proximity",
+          &flutter::StandardMethodCodec::GetInstance());
+
+  proximity_channel_->SetMethodCallHandler(
+      [this](const flutter::MethodCall<flutter::EncodableValue>& call,
+             std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>>
+                 result) {
+        HandleProximityMethodCall(call, std::move(result));
+      });
+
+  ble_win_ = std::make_unique<BleProximityWin>(
+      [hwnd_copy = hwnd_](const BlePeerDiscoveryWin& peer) {
+        auto* heap_peer = new BlePeerDiscoveryWin(peer);
+        if (!PostMessage(hwnd_copy, kBlePeerMessage, 0,
+                         reinterpret_cast<LPARAM>(heap_peer))) {
+          delete heap_peer;
+        }
+      });
 }
 
 DesktopBridge::~DesktopBridge() {
@@ -95,6 +116,9 @@ DesktopBridge::~DesktopBridge() {
 }
 
 void DesktopBridge::Cleanup() {
+  if (ble_win_) {
+    ble_win_->StopDiscovery();
+  }
   if (tray_created_) {
     NOTIFYICONDATAW nid{};
     nid.cbSize = sizeof(nid);
@@ -111,6 +135,34 @@ std::optional<LRESULT> DesktopBridge::HandleWindowMessage(HWND hwnd,
                                                           LPARAM lparam) {
   if (message == WM_CLOSE && minimize_to_tray_ && !quitting_) {
     ShowWindow(hwnd, SW_HIDE);
+    return 0;
+  }
+
+  if (message == kBlePeerMessage) {
+    std::unique_ptr<BlePeerDiscoveryWin> peer(
+        reinterpret_cast<BlePeerDiscoveryWin*>(lparam));
+    if (peer && proximity_channel_) {
+      flutter::EncodableMap map;
+      map[flutter::EncodableValue("type")] =
+          flutter::EncodableValue("blePeerFound");
+      map[flutter::EncodableValue("bleAddress")] =
+          flutter::EncodableValue(peer->address);
+      map[flutter::EncodableValue("ephemeralId")] =
+          flutter::EncodableValue(peer->ephemeral_id);
+      map[flutter::EncodableValue("name")] =
+          flutter::EncodableValue(peer->name);
+      map[flutter::EncodableValue("port")] =
+          flutter::EncodableValue(peer->port);
+      map[flutter::EncodableValue("capabilities")] =
+          flutter::EncodableValue(peer->capabilities);
+      map[flutter::EncodableValue("rssi")] =
+          flutter::EncodableValue(peer->rssi);
+      map[flutter::EncodableValue("proximityZone")] =
+          flutter::EncodableValue(peer->proximity_zone);
+      proximity_channel_->InvokeMethod(
+          "onProximityEvent",
+          std::make_unique<flutter::EncodableValue>(std::move(map)));
+    }
     return 0;
   }
 
@@ -538,4 +590,90 @@ bool DesktopBridge::WriteImageToClipboard(const std::string& file_path) {
   if (decoder) decoder->Release();
   factory->Release();
   return ok;
+}
+
+void DesktopBridge::HandleProximityMethodCall(
+    const flutter::MethodCall<flutter::EncodableValue>& call,
+    std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
+  const auto* args = std::get_if<flutter::EncodableMap>(call.arguments());
+  const std::string& method = call.method_name();
+
+  if (method == "getProximityStatus") {
+    BleAdapterStatusWin st =
+        ble_win_ ? ble_win_->GetStatus() : BleAdapterStatusWin{};
+    flutter::EncodableMap ble;
+    ble[flutter::EncodableValue("supported")] =
+        flutter::EncodableValue(st.supported);
+    ble[flutter::EncodableValue("adapterAvailable")] =
+        flutter::EncodableValue(st.adapter_available);
+    ble[flutter::EncodableValue("adapterEnabled")] =
+        flutter::EncodableValue(st.adapter_enabled);
+    ble[flutter::EncodableValue("permissionsGranted")] =
+        flutter::EncodableValue(true);
+    ble[flutter::EncodableValue("scanning")] =
+        flutter::EncodableValue(st.scanning);
+    ble[flutter::EncodableValue("advertising")] =
+        flutter::EncodableValue(st.advertising);
+    ble[flutter::EncodableValue("reason")] =
+        flutter::EncodableValue(st.reason);
+
+    flutter::EncodableMap out;
+    out[flutter::EncodableValue("supported")] = flutter::EncodableValue(true);
+    out[flutter::EncodableValue("ble")] =
+        flutter::EncodableValue(std::move(ble));
+    out[flutter::EncodableValue("nfcSupported")] =
+        flutter::EncodableValue(false);
+    out[flutter::EncodableValue("nfcEnabled")] =
+        flutter::EncodableValue(false);
+    out[flutter::EncodableValue("nfcReaderActive")] =
+        flutter::EncodableValue(false);
+    out[flutter::EncodableValue("wifiDirectSupported")] =
+        flutter::EncodableValue(false);
+    out[flutter::EncodableValue("wifiDirectPermissionsGranted")] =
+        flutter::EncodableValue(false);
+    result->Success(flutter::EncodableValue(std::move(out)));
+    return;
+  }
+
+  if (method == "requestProximityPermissions" ||
+      method == "updateSessionMetadata") {
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  if (method == "startBleDiscovery") {
+    int port = 53317;
+    std::vector<uint8_t> eph(16, 0x42);
+    if (args) {
+      auto pit = args->find(flutter::EncodableValue("port"));
+      if (pit != args->end() && std::holds_alternative<int>(pit->second)) {
+        port = std::get<int>(pit->second);
+      }
+      auto eit = args->find(flutter::EncodableValue("ephemeralBytes"));
+      if (eit != args->end() &&
+          std::holds_alternative<std::vector<uint8_t>>(eit->second)) {
+        eph = std::get<std::vector<uint8_t>>(eit->second);
+      }
+    }
+    bool ok = ble_win_ ? ble_win_->StartDiscovery(port, eph) : false;
+    flutter::EncodableMap res;
+    res[flutter::EncodableValue("advertising")] = flutter::EncodableValue(ok);
+    res[flutter::EncodableValue("scanning")] = flutter::EncodableValue(ok);
+    result->Success(flutter::EncodableValue(std::move(res)));
+    return;
+  }
+
+  if (method == "stopBleDiscovery") {
+    if (ble_win_) ble_win_->StopDiscovery();
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  if (method == "setNfcReaderEnabled" || method == "stopDirectWifiHost" ||
+      method == "disconnectDirectWifi") {
+    result->Success(flutter::EncodableValue(false));
+    return;
+  }
+
+  result->NotImplemented();
 }

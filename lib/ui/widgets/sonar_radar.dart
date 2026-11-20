@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:material_ui/material_ui.dart';
 
 import '../../models/models.dart';
+import '../../protocol/proximity/proximity_bridge.dart';
 import '../motion/md3_springs.dart';
 import 'scallop_shape.dart';
 
@@ -136,9 +137,11 @@ class _SonarRadarState extends State<SonarRadar> with TickerProviderStateMixin {
     final scheme = Theme.of(context).colorScheme;
     final trusted = widget.isTrusted(device);
     final angle = (index / total) * 2.0 * math.pi - (math.pi / 2.0);
-    final radius = total <= 4
-        ? orbitBase * 1.04
-        : (index.isOdd ? orbitBase * 1.20 : orbitBase * 0.88);
+    final radius = device.protocol == TransferProtocol.tapProximity
+        ? orbitBase * 1.32 * RssiEmaFilter.orbitFactorForZone(device.proximityZone)
+        : (total <= 4
+            ? orbitBase * 1.04
+            : (index.isOdd ? orbitBase * 1.20 : orbitBase * 0.88));
     final dx = radius * math.cos(angle);
     final dy = radius * math.sin(angle);
 
@@ -191,7 +194,9 @@ class _SonarRadarState extends State<SonarRadar> with TickerProviderStateMixin {
                       ),
                     ),
                   ),
-                  if (device.isUsb || device.protocol == TransferProtocol.quickShare)
+                  if (device.isUsb ||
+                      device.protocol == TransferProtocol.quickShare ||
+                      device.protocol == TransferProtocol.tapProximity)
                     Positioned(
                       right: -4,
                       top: -4,
@@ -208,7 +213,11 @@ class _SonarRadarState extends State<SonarRadar> with TickerProviderStateMixin {
                           ),
                         ),
                         child: Icon(
-                          device.isUsb ? Icons.usb_rounded : Icons.bolt_rounded,
+                          device.isUsb
+                              ? Icons.usb_rounded
+                              : (device.protocol == TransferProtocol.quickShare
+                                  ? Icons.bolt_rounded
+                                  : Icons.sensors_rounded),
                           size: 12,
                           color: device.isUsb
                               ? scheme.onTertiaryContainer

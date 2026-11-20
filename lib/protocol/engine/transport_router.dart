@@ -73,6 +73,9 @@ class TransportRouter {
     if (d.protocol == TransferProtocol.quickShare) {
       return 'qs:${d.id}';
     }
+    if (d.protocol == TransferProtocol.tapProximity) {
+      return 'tap:${d.instanceId ?? d.id}';
+    }
     return 'peer:${d.ip}:${d.name.trim().toLowerCase()}';
   }
 
@@ -98,6 +101,8 @@ class TransportRouter {
           tlsFingerprint: d.tlsFingerprint,
           endpointId: d.endpointId,
           instanceId: d.instanceId,
+          rssi: d.rssi,
+          proximityZone: d.proximityZone,
         );
         final existing = meta[key];
         if (existing == null || d.lastSeen.isAfter(existing.lastSeen)) {
@@ -172,6 +177,27 @@ class TransportRouter {
               lastSeen: peer.lastSeen,
             ),
           ));
+        }
+      }
+      // Also attach any matching-name proximity/internet fallback peer when LAN routes fail
+      final lowerName = peer.name.trim().toLowerCase();
+      for (final other in _peersByKey.values) {
+        if (other.peerKey == peer.peerKey) continue;
+        if (other.name.trim().toLowerCase() != lowerName) continue;
+        for (final ep in other.orderedEndpoints) {
+          if (routes.any((r) => r.ch.id == ep.channelId)) continue;
+          final ch = channelById(ep.channelId);
+          if (ch != null && ch.isAvailable) {
+            routes.add((
+              ch: ch,
+              target: ep.toNearbyDevice(
+                peerKey: other.peerKey,
+                name: other.name,
+                deviceKind: other.deviceKind,
+                lastSeen: other.lastSeen,
+              ),
+            ));
+          }
         }
       }
     }

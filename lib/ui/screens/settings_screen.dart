@@ -342,6 +342,74 @@ class SettingsScreen extends StatelessWidget {
                 ),
               ),
 
+              // Proximity (BLE / NFC / Wi-Fi Direct) diagnostics & runtime permissions
+              _SectionHeader(strings.tr('settings_proximity_title')),
+              ListenableBuilder(
+                listenable: coordinator,
+                builder: (context, _) {
+                  final st = coordinator.proximityStatus;
+                  final ble = st.ble;
+                  final bleSubtitle = !ble.adapterAvailable
+                      ? strings.tr('settings_ble_no_hw')
+                      : (!ble.adapterEnabled
+                          ? strings.tr('settings_ble_disabled')
+                          : (!ble.permissionsGranted
+                              ? strings.tr('settings_ble_perms')
+                              : strings.tr('settings_ble_ready')));
+                  final nfcSubtitle = !st.nfcSupported
+                      ? strings.tr('settings_nfc_no_hw')
+                      : (st.nfcEnabled
+                          ? strings.tr('settings_nfc_ready')
+                          : strings.tr('settings_nfc_off'));
+                  final needsPerms = ble.adapterAvailable &&
+                      (!ble.permissionsGranted ||
+                          (Platform.isAndroid &&
+                              !st.wifiDirectPermissionsGranted));
+                  return Card(
+                    child: Column(
+                      children: [
+                        ListTile(
+                          leading: Icon(
+                            ble.adapterAvailable && ble.adapterEnabled
+                                ? Icons.bluetooth_searching_rounded
+                                : Icons.bluetooth_disabled_rounded,
+                            color: ble.adapterAvailable && ble.adapterEnabled
+                                ? scheme.primary
+                                : scheme.onSurfaceVariant,
+                          ),
+                          title: Text(strings.tr('protocol_tap')),
+                          subtitle: Text(bleSubtitle),
+                          trailing: needsPerms
+                              ? FilledButton.tonal(
+                                  onPressed: () => coordinator
+                                      .requestProximityPermissions(),
+                                  child: Text(strings.tr('settings_grant_perms')),
+                                )
+                              : IconButton(
+                                  icon: const Icon(Icons.refresh_rounded,
+                                      size: 20),
+                                  onPressed: coordinator.refreshProximityStatus,
+                                ),
+                        ),
+                        if (Platform.isAndroid) ...[
+                          const Divider(height: 1, indent: 16, endIndent: 16),
+                          ListTile(
+                            leading: Icon(
+                              Icons.nfc_rounded,
+                              color: st.nfcEnabled
+                                  ? scheme.primary
+                                  : scheme.onSurfaceVariant,
+                            ),
+                            title: const Text('NFC Tap-to-Share'),
+                            subtitle: Text(nfcSubtitle),
+                          ),
+                        ],
+                      ],
+                    ),
+                  );
+                },
+              ),
+
               // Network note (IP/ports live on the Receive tab)
               _SectionHeader(strings.tr('settings_network_title')),
               Card(

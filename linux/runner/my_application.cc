@@ -5,6 +5,7 @@
 #include <unistd.h>
 
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -103,6 +104,11 @@ struct _MyApplication {
   char** dart_entrypoint_arguments;
   GtkWindow* main_window;
   FlMethodChannel* desktop_channel;
+  FlMethodChannel* proximity_channel;
+  GDBusConnection* system_bus;
+  guint bluez_sub_id;
+  gchar* bluez_adapter_path;
+  bool ble_scanning;
   IndicatorApi indicator_api;
   void* tray_indicator;
   GtkWidget* tray_menu;
@@ -411,6 +417,281 @@ static void desktop_method_call_handler(FlMethodChannel* channel,
   fl_method_call_respond(method_call, response, nullptr);
 }
 
+struct BluezAdapterInfo {
+  bool available = false;
+  bool powered = false;
+  std::string path;
+};
+
+static BluezAdapterInfo query_bluez_adapter(GDBusConnection* bus) {
+  BluezAdapterInfo info;
+  if (!bus) return info;
+
+  g_autoptr(GError) err = nullptr;
+  g_autoptr(GVariant) reply = g_dbus_connection_call_sync(
+      bus, "org.bluez", "/", "org.freedesktop.DBus.ObjectManager",
+      "GetManagedObjects", nullptr, G_VARIANT_TYPE("(a{oa{sa{sv}}})"),
+      G_DBUS_CALL_FLAGS_NONE, 1000, nullptr, &err);
+  if (!reply) return info;
+
+  g_autoptr(GVariantIter) objects = nullptr;
+  g_variant_get(reply, "(a{oa{sa{sv}}})", &objects);
+  const gchar* obj_path = nullptr;
+  GVariantIter* ifaces = nullptr;
+  while (g_variant_iter_loop(objects, "{&oa{sa{sv}}}", &obj_path, &ifaces)) {
+    const gchar* iface_name = nullptr;
+    GVariantIter* props = nullptr;
+    while (g_variant_iter_loop(ifaces, "{&sa{sv}}", &iface_name, &props)) {
+      if (g_strcmp0(iface_name, "org.bluez.Adapter1") == 0 && !info.available) {
+        info.available = true;
+        info.path = obj_path ? obj_path : "";
+        const gchar* prop_name = nullptr;
+        GVariant* prop_val = nullptr;
+        while (g_variant_iter_loop(props, "{&sv}", &prop_name, &prop_val)) {
+          if (g_strcmp0(prop_name, "Powered") == 0 &&
+              g_variant_is_of_type(prop_val, G_VARIANT_TYPE_BOOLEAN)) {
+            info.powered = g_variant_get_boolean(prop_val) != FALSE;
+          }
+        }
+      }
+    }
+  }
+  return info;
+}
+
+static void emit_linux_ble_peer(MyApplication* self, const gchar* addr,
+                                const gchar* name, gint16 rssi,
+                                GVariant* mfg_dict) {
+  if (!self->proximity_channel || !mfg_dict) return;
+  g_autoptr(GVariant) payload_var = nullptr;
+  GVariantIter iter;
+  guint16 company_id = 0;
+  GVariant* val = nullptr;
+  g_variant_iter_init(&iter, mfg_dict);
+  while (g_variant_iter_loop(&iter, "{qv}", &company_id, &val)) {
+    if (company_id == 0x4D44 && !payload_var) {
+      payload_var = g_variant_ref(val);
+    }
+  }
+  if (!payload_var) return;
+
+  gsize n_bytes = 0;
+  const guint8* raw = static_cast<const guint8*>(
+      g_variant_get_fixed_array(payload_var, &n_bytes, sizeof(guint8)));
+  if (!raw || n_bytes < 20) return;
+
+  int caps = raw[1];
+  int port = (static_cast<int>(raw[2]) << 8) | raw[3];
+  static const char kHex[] = "0123456789ABCDEF";
+  std::string eph_hex;
+  eph_hex.reserve(32);
+  for (gsize i = 4; i < 20; ++i) {
+    eph_hex.push_back(kHex[(raw[i] >> 4) & 0xF]);
+    eph_hex.push_back(kHex[raw[i] & 0xF]);
+  }
+  const char* zone = (rssi >= -55) ? "immediate" : ((rssi >= -75) ? "near" : "far");
+
+  g_autoptr(FlValue) map = fl_value_new_map();
+  fl_value_set_string_take(map, "type", fl_value_new_string("blePeerFound"));
+  fl_value_set_string_take(map, "bleAddress",
+                           fl_value_new_string(addr ? addr : ""));
+  fl_value_set_string_take(map, "ephemeralId",
+                           fl_value_new_string(eph_hex.c_str()));
+  fl_value_set_string_take(
+      map, "name",
+      fl_value_new_string((name && name[0] != '\0') ? name : "Nearby Device"));
+  fl_value_set_string_take(map, "port", fl_value_new_int(port));
+  fl_value_set_string_take(map, "capabilities", fl_value_new_int(caps));
+  fl_value_set_string_take(map, "rssi", fl_value_new_int(rssi));
+  fl_value_set_string_take(map, "proximityZone", fl_value_new_string(zone));
+
+  fl_method_channel_invoke_method(self->proximity_channel, "onProximityEvent",
+                                  map, nullptr, nullptr, nullptr);
+}
+
+static void on_bluez_signal(GDBusConnection* connection,
+                            const gchar* sender_name,
+                            const gchar* object_path,
+                            const gchar* interface_name,
+                            const gchar* signal_name, GVariant* parameters,
+                            gpointer user_data) {
+  (void)connection;
+  (void)sender_name;
+  (void)interface_name;
+  auto* self = MY_APPLICATION(user_data);
+  if (!self->ble_scanning || !parameters) return;
+
+  if (g_strcmp0(signal_name, "InterfacesAdded") == 0) {
+    const gchar* path = nullptr;
+    GVariantIter* ifaces = nullptr;
+    g_variant_get(parameters, "(&oa{sa{sv}})", &path, &ifaces);
+    const gchar* iface = nullptr;
+    GVariantIter* props = nullptr;
+    while (g_variant_iter_loop(ifaces, "{&sa{sv}}", &iface, &props)) {
+      if (g_strcmp0(iface, "org.bluez.Device1") == 0) {
+        const gchar* addr = "";
+        const gchar* alias = "Nearby Device";
+        gint16 rssi = -70;
+        g_autoptr(GVariant) mfg = nullptr;
+        const gchar* k = nullptr;
+        GVariant* v = nullptr;
+        while (g_variant_iter_loop(props, "{&sv}", &k, &v)) {
+          if (g_strcmp0(k, "Address") == 0 &&
+              g_variant_is_of_type(v, G_VARIANT_TYPE_STRING)) {
+            addr = g_variant_get_string(v, nullptr);
+          } else if (g_strcmp0(k, "Alias") == 0 &&
+                     g_variant_is_of_type(v, G_VARIANT_TYPE_STRING)) {
+            alias = g_variant_get_string(v, nullptr);
+          } else if (g_strcmp0(k, "RSSI") == 0 &&
+                     g_variant_is_of_type(v, G_VARIANT_TYPE_INT16)) {
+            rssi = g_variant_get_int16(v);
+          } else if (g_strcmp0(k, "ManufacturerData") == 0) {
+            mfg = g_variant_ref(v);
+          }
+        }
+        if (mfg) emit_linux_ble_peer(self, addr, alias, rssi, mfg);
+      }
+    }
+  } else if (g_strcmp0(signal_name, "PropertiesChanged") == 0 &&
+             object_path != nullptr) {
+    const gchar* iface = nullptr;
+    GVariantIter* changed = nullptr;
+    g_variant_get(parameters, "(&sa{sv}as)", &iface, &changed, nullptr);
+    if (g_strcmp0(iface, "org.bluez.Device1") == 0) {
+      gint16 rssi = -70;
+      g_autoptr(GVariant) mfg = nullptr;
+      const gchar* k = nullptr;
+      GVariant* v = nullptr;
+      while (g_variant_iter_loop(changed, "{&sv}", &k, &v)) {
+        if (g_strcmp0(k, "RSSI") == 0 &&
+            g_variant_is_of_type(v, G_VARIANT_TYPE_INT16)) {
+          rssi = g_variant_get_int16(v);
+        } else if (g_strcmp0(k, "ManufacturerData") == 0) {
+          mfg = g_variant_ref(v);
+        }
+      }
+      if (mfg) emit_linux_ble_peer(self, object_path, "Nearby Device", rssi, mfg);
+    }
+  }
+}
+
+static void stop_linux_ble(MyApplication* self) {
+  if (self->bluez_sub_id != 0 && self->system_bus) {
+    g_dbus_connection_signal_unsubscribe(self->system_bus, self->bluez_sub_id);
+    self->bluez_sub_id = 0;
+  }
+  if (self->ble_scanning && self->system_bus && self->bluez_adapter_path) {
+    g_autoptr(GError) err = nullptr;
+    g_autoptr(GVariant) r = g_dbus_connection_call_sync(
+        self->system_bus, "org.bluez", self->bluez_adapter_path,
+        "org.bluez.Adapter1", "StopDiscovery", nullptr, nullptr,
+        G_DBUS_CALL_FLAGS_NONE, 800, nullptr, &err);
+    (void)r;
+  }
+  self->ble_scanning = false;
+}
+
+static void proximity_method_call_handler(FlMethodChannel* channel,
+                                          FlMethodCall* method_call,
+                                          gpointer user_data) {
+  (void)channel;
+  auto* self = MY_APPLICATION(user_data);
+  const gchar* method = fl_method_call_get_name(method_call);
+  g_autoptr(FlMethodResponse) response = nullptr;
+
+  if (!self->system_bus) {
+    g_autoptr(GError) err = nullptr;
+    self->system_bus = g_bus_get_sync(G_BUS_TYPE_SYSTEM, nullptr, &err);
+  }
+
+  if (g_strcmp0(method, "getProximityStatus") == 0) {
+    BluezAdapterInfo info = query_bluez_adapter(self->system_bus);
+    const char* reason = !info.available
+                             ? "no_ble_hardware"
+                             : (!info.powered ? "bluetooth_disabled" : "ready");
+    g_autoptr(FlValue) ble = fl_value_new_map();
+    fl_value_set_string_take(ble, "supported",
+                             fl_value_new_bool(info.available));
+    fl_value_set_string_take(ble, "adapterAvailable",
+                             fl_value_new_bool(info.available));
+    fl_value_set_string_take(ble, "adapterEnabled",
+                             fl_value_new_bool(info.powered));
+    fl_value_set_string_take(ble, "permissionsGranted",
+                             fl_value_new_bool(true));
+    fl_value_set_string_take(ble, "scanning",
+                             fl_value_new_bool(self->ble_scanning));
+    fl_value_set_string_take(ble, "advertising", fl_value_new_bool(false));
+    fl_value_set_string_take(ble, "reason", fl_value_new_string(reason));
+
+    g_autoptr(FlValue) out = fl_value_new_map();
+    fl_value_set_string_take(out, "supported", fl_value_new_bool(true));
+    fl_value_set_string_take(out, "ble", fl_value_ref(ble));
+    fl_value_set_string_take(out, "nfcSupported", fl_value_new_bool(false));
+    fl_value_set_string_take(out, "nfcEnabled", fl_value_new_bool(false));
+    fl_value_set_string_take(out, "nfcReaderActive", fl_value_new_bool(false));
+    fl_value_set_string_take(out, "wifiDirectSupported",
+                             fl_value_new_bool(false));
+    fl_value_set_string_take(out, "wifiDirectPermissionsGranted",
+                             fl_value_new_bool(false));
+    response = FL_METHOD_RESPONSE(fl_method_success_response_new(out));
+  } else if (g_strcmp0(method, "requestProximityPermissions") == 0 ||
+             g_strcmp0(method, "updateSessionMetadata") == 0) {
+    response = FL_METHOD_RESPONSE(
+        fl_method_success_response_new(fl_value_new_bool(true)));
+  } else if (g_strcmp0(method, "startBleDiscovery") == 0) {
+    BluezAdapterInfo info = query_bluez_adapter(self->system_bus);
+    bool scan_ok = false;
+    if (info.available && info.powered && !info.path.empty()) {
+      stop_linux_ble(self);
+      g_free(self->bluez_adapter_path);
+      self->bluez_adapter_path = g_strdup(info.path.c_str());
+
+      self->bluez_sub_id = g_dbus_connection_signal_subscribe(
+          self->system_bus, "org.bluez", nullptr, nullptr, nullptr, nullptr,
+          G_DBUS_SIGNAL_FLAGS_NONE, on_bluez_signal, self, nullptr);
+
+      GVariantBuilder dict;
+      g_variant_builder_init(&dict, G_VARIANT_TYPE("a{sv}"));
+      g_variant_builder_add(&dict, "{sv}", "Transport",
+                            g_variant_new_string("le"));
+      g_autoptr(GError) f_err = nullptr;
+      g_autoptr(GVariant) f_res = g_dbus_connection_call_sync(
+          self->system_bus, "org.bluez", self->bluez_adapter_path,
+          "org.bluez.Adapter1", "SetDiscoveryFilter",
+          g_variant_new("(a{sv})", &dict), nullptr, G_DBUS_CALL_FLAGS_NONE,
+          1000, nullptr, &f_err);
+      (void)f_res;
+
+      g_autoptr(GError) s_err = nullptr;
+      g_autoptr(GVariant) s_res = g_dbus_connection_call_sync(
+          self->system_bus, "org.bluez", self->bluez_adapter_path,
+          "org.bluez.Adapter1", "StartDiscovery", nullptr, nullptr,
+          G_DBUS_CALL_FLAGS_NONE, 1000, nullptr, &s_err);
+      if (s_res != nullptr) {
+        self->ble_scanning = true;
+        scan_ok = true;
+      }
+    }
+    g_autoptr(FlValue) res = fl_value_new_map();
+    fl_value_set_string_take(res, "advertising", fl_value_new_bool(false));
+    fl_value_set_string_take(res, "scanning", fl_value_new_bool(scan_ok));
+    response = FL_METHOD_RESPONSE(fl_method_success_response_new(res));
+  } else if (g_strcmp0(method, "stopBleDiscovery") == 0) {
+    stop_linux_ble(self);
+    response = FL_METHOD_RESPONSE(
+        fl_method_success_response_new(fl_value_new_bool(true)));
+  } else if (g_strcmp0(method, "setNfcReaderEnabled") == 0 ||
+             g_strcmp0(method, "stopDirectWifiHost") == 0 ||
+             g_strcmp0(method, "disconnectDirectWifi") == 0) {
+    response = FL_METHOD_RESPONSE(
+        fl_method_success_response_new(fl_value_new_bool(false)));
+  } else {
+    response = FL_METHOD_RESPONSE(fl_method_not_implemented_response_new());
+  }
+
+  fl_method_call_respond(method_call, response, nullptr);
+}
+
 static gboolean on_window_delete_event(GtkWidget* widget, GdkEvent* event,
                                        gpointer user_data) {
   (void)event;
@@ -466,6 +747,11 @@ static void my_application_activate(GApplication* application) {
   fl_method_channel_set_method_call_handler(
       self->desktop_channel, desktop_method_call_handler, self, nullptr);
 
+  self->proximity_channel = fl_method_channel_new(
+      messenger, "dev.materialdrop.flutter/proximity", FL_METHOD_CODEC(codec));
+  fl_method_channel_set_method_call_handler(
+      self->proximity_channel, proximity_method_call_handler, self, nullptr);
+
   gtk_widget_grab_focus(GTK_WIDGET(view));
 }
 
@@ -502,8 +788,12 @@ static void my_application_shutdown(GApplication* application) {
 // Implements GObject::dispose.
 static void my_application_dispose(GObject* object) {
   MyApplication* self = MY_APPLICATION(object);
+  stop_linux_ble(self);
+  g_clear_pointer(&self->bluez_adapter_path, g_free);
+  g_clear_object(&self->system_bus);
   g_clear_pointer(&self->dart_entrypoint_arguments, g_strfreev);
   g_clear_object(&self->desktop_channel);
+  g_clear_object(&self->proximity_channel);
   G_OBJECT_CLASS(my_application_parent_class)->dispose(object);
 }
 
@@ -519,6 +809,11 @@ static void my_application_class_init(MyApplicationClass* klass) {
 static void my_application_init(MyApplication* self) {
   self->main_window = nullptr;
   self->desktop_channel = nullptr;
+  self->proximity_channel = nullptr;
+  self->system_bus = nullptr;
+  self->bluez_sub_id = 0;
+  self->bluez_adapter_path = nullptr;
+  self->ble_scanning = false;
   self->indicator_api = IndicatorApi{};
   self->tray_indicator = nullptr;
   self->tray_menu = nullptr;

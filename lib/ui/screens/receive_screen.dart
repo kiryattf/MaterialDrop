@@ -189,7 +189,9 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                   label: Text(
                     offer.protocol == TransferProtocol.quickShare
                         ? strings.tr('protocol_quickshare')
-                        : strings.tr('protocol_direct'),
+                        : (offer.protocol == TransferProtocol.tapProximity
+                            ? strings.tr('protocol_tap')
+                            : strings.tr('protocol_direct')),
                   ),
                 ),
               ],

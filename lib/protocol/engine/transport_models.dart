@@ -15,6 +15,8 @@ class TransportEndpoint {
   final String? tlsFingerprint;
   final String? endpointId;
   final String? instanceId;
+  final int? rssi;
+  final String? proximityZone;
 
   const TransportEndpoint({
     required this.channelId,
@@ -28,6 +30,8 @@ class TransportEndpoint {
     this.tlsFingerprint,
     this.endpointId,
     this.instanceId,
+    this.rssi,
+    this.proximityZone,
   });
 
   NearbyDevice toNearbyDevice({
@@ -50,6 +54,8 @@ class TransportEndpoint {
       channelId: channelId,
       tlsFingerprint: tlsFingerprint,
       useHttps: useHttps,
+      rssi: rssi,
+      proximityZone: proximityZone,
     );
   }
 }

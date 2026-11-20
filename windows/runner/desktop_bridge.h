@@ -11,9 +11,12 @@
 #include <optional>
 #include <string>
 
+#include "ble_proximity_win.h"
+
 class DesktopBridge {
  public:
   static constexpr UINT kTrayCallbackMessage = WM_APP + 100;
+  static constexpr UINT kBlePeerMessage = WM_APP + 101;
 
   DesktopBridge(HWND hwnd, flutter::BinaryMessenger* messenger);
   ~DesktopBridge();
@@ -26,6 +29,9 @@ class DesktopBridge {
   void HandleMethodCall(
       const flutter::MethodCall<flutter::EncodableValue>& call,
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
+  void HandleProximityMethodCall(
+      const flutter::MethodCall<flutter::EncodableValue>& call,
+      std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
 
   void InitOrUpdateTray(const flutter::EncodableMap* args, bool init);
   void ShowTrayContextMenu();
@@ -36,6 +42,9 @@ class DesktopBridge {
 
   HWND hwnd_;
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> channel_;
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
+      proximity_channel_;
+  std::unique_ptr<BleProximityWin> ble_win_;
   bool tray_created_ = false;
   bool minimize_to_tray_ = true;
   bool auto_accept_ = false;

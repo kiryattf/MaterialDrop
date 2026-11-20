@@ -308,7 +308,10 @@ class _HistoryTile extends StatelessWidget {
                           child: Text(
                             entry.protocol == TransferProtocol.quickShare
                                 ? strings.tr('protocol_quickshare')
-                                : strings.tr('protocol_direct'),
+                                : (entry.protocol ==
+                                        TransferProtocol.tapProximity
+                                    ? strings.tr('protocol_tap')
+                                    : strings.tr('protocol_direct')),
                             style: textTheme.labelSmall?.copyWith(
                               color: scheme.onSurfaceVariant,
                             ),

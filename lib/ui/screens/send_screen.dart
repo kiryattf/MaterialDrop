@@ -616,6 +616,21 @@ class _SendScreenState extends State<SendScreen> {
     );
   }
 
+  String _protocolLabel(NearbyDevice dev, AppStrings strings) {
+    if (dev.protocol == TransferProtocol.quickShare) {
+      return strings.tr('protocol_quickshare');
+    }
+    if (dev.protocol == TransferProtocol.tapProximity) {
+      final zoneKey = switch (dev.proximityZone) {
+        'immediate' => 'proximity_immediate',
+        'near' => 'proximity_near',
+        _ => 'proximity_far',
+      };
+      return '${strings.tr('protocol_tap')} (${strings.tr(zoneKey)})';
+    }
+    return dev.isUsb ? strings.tr('usb_badge') : strings.tr('protocol_direct');
+  }
+
   Future<void> _selectOrPickForDevice(NearbyDevice dev) async {
     if (_stagedFiles.isEmpty) {
       await _pickFiles();
@@ -949,7 +964,9 @@ class _SendScreenState extends State<SendScreen> {
                                     ),
                                   ),
                                   Text(
-                                    '${dev.protocol == TransferProtocol.quickShare ? strings.tr('protocol_quickshare') : (dev.isUsb ? strings.tr('usb_badge') : strings.tr('protocol_direct'))} • ${dev.ip}:${dev.port}',
+                                    dev.protocol == TransferProtocol.tapProximity
+                                        ? '${_protocolLabel(dev, strings)}${dev.rssi != null ? ' • ${dev.rssi} dBm' : ''}'
+                                        : '${_protocolLabel(dev, strings)} • ${dev.ip}:${dev.port}',
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis,
                                     style: textTheme.labelSmall?.copyWith(
@@ -1437,12 +1454,8 @@ class _SendScreenState extends State<SendScreen> {
                                       final dev = devices[idx];
                                       final trusted = widget.settings
                                           .isDeviceTrusted(dev);
-                                      final protoLabel = dev.protocol ==
-                                              TransferProtocol.quickShare
-                                          ? strings.tr('protocol_quickshare')
-                                          : (dev.isUsb
-                                              ? strings.tr('usb_badge')
-                                              : strings.tr('protocol_direct'));
+                                      final protoLabel =
+                                          _protocolLabel(dev, strings);
                                       return ListTile(
                                         shape: RoundedRectangleBorder(
                                           borderRadius:
@@ -1559,7 +1572,7 @@ class _SendScreenState extends State<SendScreen> {
                                   : null,
                             ),
                             label: Text(
-                              '${dev.name} • ${dev.protocol == TransferProtocol.quickShare ? strings.tr('protocol_quickshare') : (dev.isUsb ? strings.tr('usb_badge') : strings.tr('protocol_direct'))}',
+                              '${dev.name} • ${_protocolLabel(dev, strings)}',
                             ),
                             onPressed: () => setState(() => _selectedDevice = dev),
                           ),

@@ -11,6 +11,9 @@ import android.net.Uri
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.net.wifi.WifiManager
+import android.nfc.NfcAdapter
+import android.nfc.Tag
+import android.nfc.tech.IsoDep
 import android.os.Build
 import android.os.Environment
 import android.os.Handler
@@ -24,10 +27,12 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.InputStream
+import java.nio.charset.StandardCharsets
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Executors
@@ -38,6 +43,8 @@ class MainActivity : FlutterActivity() {
     private val platformChannelName = "dev.materialdrop.flutter/platform"
     private val shareEventChannelName = "dev.materialdrop.flutter/share_events"
     private val nsdEventChannelName = "dev.materialdrop.flutter/nsd_events"
+    private val proximityChannelName = "dev.materialdrop.flutter/proximity"
+    private val proximityEventChannelName = "dev.materialdrop.flutter/proximity_events"
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val ioExecutor = Executors.newCachedThreadPool()
@@ -46,6 +53,13 @@ class MainActivity : FlutterActivity() {
     private var initialSharePayload: Map<String, Any?>? = null
     private var shareEventSink: EventChannel.EventSink? = null
     private var nsdEventSink: EventChannel.EventSink? = null
+    private var proximityEventSink: EventChannel.EventSink? = null
+
+    private lateinit var bleManager: BleProximityManager
+    private lateinit var wifiDirectManager: WifiDirectManager
+    private var nfcAdapter: NfcAdapter? = null
+    private var nfcReaderRequested = false
+    private var pendingPermResult: MethodChannel.Result? = null
 
     private val openStreams = ConcurrentHashMap<Int, InputStream>()
     private val streamIdGen = AtomicInteger(1)
@@ -63,9 +77,171 @@ class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
+        bleManager = BleProximityManager(
+            context = applicationContext,
+            onPeerDiscovered = { eventMap ->
+                mainHandler.post { proximityEventSink?.success(eventMap) }
+            },
+            onGattPayloadReceived = { jsonStr ->
+                ProximitySessionStore.parseAndNotifyHandshake("ble_gatt", jsonStr)
+            },
+        )
+        wifiDirectManager = WifiDirectManager(applicationContext)
+        nfcAdapter = NfcAdapter.getDefaultAdapter(this)
+        ProximitySessionStore.onPeerHandshakeListener = { source, peerMap ->
+            mainHandler.post {
+                proximityEventSink?.success(
+                    hashMapOf<String, Any?>(
+                        "type" to "handshake",
+                        "source" to source,
+                        "peer" to peerMap,
+                    )
+                )
+            }
+        }
+
         if (initialSharePayload == null) {
             initialSharePayload = parseShareIntent(intent)
         }
+
+        EventChannel(flutterEngine.dartExecutor.binaryMessenger, proximityEventChannelName)
+            .setStreamHandler(object : EventChannel.StreamHandler {
+                override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                    proximityEventSink = events
+                }
+
+                override fun onCancel(arguments: Any?) {
+                    proximityEventSink = null
+                }
+            })
+
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, proximityChannelName)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "getProximityStatus" -> {
+                        val bleStatus = bleManager.getStatus()
+                        val nfcSupported = packageManager.hasSystemFeature(PackageManager.FEATURE_NFC)
+                        val nfcEnabled = nfcAdapter?.isEnabled == true
+                        val wifiP2pSupported = packageManager.hasSystemFeature(PackageManager.FEATURE_WIFI_DIRECT)
+                        result.success(
+                            mapOf(
+                                "supported" to true,
+                                "ble" to bleStatus,
+                                "nfcSupported" to nfcSupported,
+                                "nfcEnabled" to nfcEnabled,
+                                "nfcReaderActive" to nfcReaderRequested,
+                                "wifiDirectSupported" to wifiP2pSupported,
+                                "wifiDirectPermissionsGranted" to wifiDirectManager.hasNearbyWifiPermission(),
+                                "ephemeralId" to ProximitySessionStore.getEphemeralIdHex(),
+                            )
+                        )
+                    }
+
+                    "requestProximityPermissions" -> {
+                        requestProximityPermissionsInternal(result)
+                    }
+
+                    "updateSessionMetadata" -> {
+                        call.argument<String>("deviceName")?.let {
+                            ProximitySessionStore.deviceName = it
+                        }
+                        call.argument<Int>("port")?.let {
+                            ProximitySessionStore.transferPort = it
+                        }
+                        call.argument<String>("fingerprint")?.let {
+                            ProximitySessionStore.tlsFingerprint = it
+                        }
+                        call.argument<String>("irohTicket")?.let {
+                            ProximitySessionStore.irohTicket = it
+                        }
+                        result.success(true)
+                    }
+
+                    "startBleDiscovery" -> {
+                        val port = call.argument<Int>("port") ?: 53317
+                        val lowLatency = call.argument<Boolean>("lowLatency") ?: true
+                        val advOk = bleManager.startAdvertising(port)
+                        val scanOk = bleManager.startScanning(lowLatency)
+                        result.success(
+                            mapOf(
+                                "advertising" to advOk,
+                                "scanning" to scanOk,
+                            )
+                        )
+                    }
+
+                    "stopBleDiscovery" -> {
+                        bleManager.stopScanning()
+                        bleManager.stopAdvertising()
+                        result.success(true)
+                    }
+
+                    "exchangeGattHandshake" -> {
+                        val addr = call.argument<String>("bleAddress") ?: ""
+                        val outgoingJson = call.argument<String>("outgoingJson")
+                        if (addr.isEmpty()) {
+                            result.error("INVALID_ADDR", "BLE address is empty", null)
+                            return@setMethodCallHandler
+                        }
+                        bleManager.exchangeGattHandshake(addr, outgoingJson) { payload, err ->
+                            mainHandler.post {
+                                if (payload != null) {
+                                    result.success(payload)
+                                } else {
+                                    result.error("GATT_ERROR", err ?: "GATT failed", null)
+                                }
+                            }
+                        }
+                    }
+
+                    "setNfcReaderEnabled" -> {
+                        val enabled = call.argument<Boolean>("enabled") ?: false
+                        nfcReaderRequested = enabled
+                        if (enabled) enableNfcReaderMode() else disableNfcReaderMode()
+                        result.success(nfcAdapter?.isEnabled == true)
+                    }
+
+                    "startDirectWifiHost" -> {
+                        wifiDirectManager.startDirectHost { info, err ->
+                            mainHandler.post {
+                                if (info != null) {
+                                    result.success(info)
+                                } else {
+                                    result.error("WIFI_HOST_ERROR", err ?: "Host failed", null)
+                                }
+                            }
+                        }
+                    }
+
+                    "stopDirectWifiHost" -> {
+                        wifiDirectManager.stopDirectHost()
+                        result.success(true)
+                    }
+
+                    "connectDirectWifi" -> {
+                        val ssid = call.argument<String>("ssid") ?: ""
+                        val pass = call.argument<String>("passphrase") ?: ""
+                        if (ssid.isEmpty() || pass.isEmpty()) {
+                            result.error("INVALID_CREDS", "Missing SSID/passphrase", null)
+                            return@setMethodCallHandler
+                        }
+                        wifiDirectManager.connectDirectWifi(ssid, pass) { resMap, err ->
+                            if (resMap != null) {
+                                result.success(resMap)
+                            } else {
+                                result.error("WIFI_CONNECT_ERROR", err ?: "Connect failed", null)
+                            }
+                        }
+                    }
+
+                    "disconnectDirectWifi" -> {
+                        wifiDirectManager.disconnectDirectWifi()
+                        result.success(true)
+                    }
+
+                    else -> result.notImplemented()
+                }
+            }
 
         EventChannel(flutterEngine.dartExecutor.binaryMessenger, shareEventChannelName)
             .setStreamHandler(object : EventChannel.StreamHandler {
@@ -331,7 +507,23 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        if (nfcReaderRequested) {
+            enableNfcReaderMode()
+        }
+    }
+
+    override fun onPause() {
+        disableNfcReaderMode()
+        super.onPause()
+    }
+
     override fun onDestroy() {
+        disableNfcReaderMode()
+        if (::bleManager.isInitialized) bleManager.cleanup()
+        if (::wifiDirectManager.isInitialized) wifiDirectManager.cleanup()
+        ProximitySessionStore.onPeerHandshakeListener = null
         stopNsdDiscoveryInternal()
         unregisterNsdServiceInternal()
         try {
@@ -657,6 +849,122 @@ class MainActivity : FlutterActivity() {
             registrationListener = null
             registeredNsdName = null
         }
+    }
+
+    private fun requestProximityPermissionsInternal(result: MethodChannel.Result) {
+        val needed = mutableListOf<String>()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            needed.add(Manifest.permission.NEARBY_WIFI_DEVICES)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            needed.add(Manifest.permission.BLUETOOTH_SCAN)
+            needed.add(Manifest.permission.BLUETOOTH_ADVERTISE)
+            needed.add(Manifest.permission.BLUETOOTH_CONNECT)
+        } else {
+            needed.add(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+        val missing = needed.filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (missing.isEmpty()) {
+            result.success(true)
+            return
+        }
+        pendingPermResult?.success(false)
+        pendingPermResult = result
+        ActivityCompat.requestPermissions(this, missing.toTypedArray(), 2002)
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 2002) {
+            val allGranted = grantResults.isNotEmpty() &&
+                grantResults.all { it == PackageManager.PERMISSION_GRANTED }
+            val cb = pendingPermResult
+            pendingPermResult = null
+            cb?.success(allGranted)
+        }
+    }
+
+    private fun enableNfcReaderMode() {
+        val adapter = nfcAdapter ?: return
+        if (!adapter.isEnabled) return
+        val flags = NfcAdapter.FLAG_READER_NFC_A or NfcAdapter.FLAG_READER_SKIP_NDEF_CHECK
+        try {
+            adapter.enableReaderMode(this, { tag -> handleNfcTagDiscovered(tag) }, flags, null)
+        } catch (_: Exception) {}
+    }
+
+    private fun disableNfcReaderMode() {
+        try {
+            nfcAdapter?.disableReaderMode(this)
+        } catch (_: Exception) {}
+    }
+
+    private fun handleNfcTagDiscovered(tag: Tag) {
+        val isoDep = IsoDep.get(tag) ?: return
+        ioExecutor.execute {
+            try {
+                isoDep.connect()
+                isoDep.timeout = 4000
+
+                // 1. SELECT AID: F04D415444524F50
+                val aid = MaterialDropApduService.AID
+                val selectApdu = byteArrayOf(0x00, 0xA4.toByte(), 0x04, 0x00, aid.size.toByte()) + aid + byteArrayOf(0x00)
+                val selectResp = isoDep.transceive(selectApdu)
+                if (!isStatusOk(selectResp)) return@execute
+
+                // 2. EXCHANGE_HELLO (with automatic chunked continuation on 0x61 <idx>)
+                val localHello = ProximitySessionStore.buildHandshakeJson().toByteArray(StandardCharsets.UTF_8)
+                val body = if (localHello.size <= 240) localHello else localHello.copyOf(240)
+                val exchangeApdu = byteArrayOf(
+                    MaterialDropApduService.CLA_CUSTOM,
+                    MaterialDropApduService.INS_EXCHANGE_HELLO,
+                    0x00,
+                    0x00,
+                    body.size.toByte()
+                ) + body + byteArrayOf(0x00)
+
+                val full = ByteArrayOutputStream()
+                var resp = isoDep.transceive(exchangeApdu)
+                while (resp.size >= 2) {
+                    val sw1 = resp[resp.size - 2].toInt() and 0xFF
+                    val sw2 = resp[resp.size - 1].toInt() and 0xFF
+                    full.write(resp, 0, resp.size - 2)
+                    if (sw1 == 0x90 && sw2 == 0x00) {
+                        break
+                    } else if (sw1 == 0x61) {
+                        val nextApdu = byteArrayOf(
+                            MaterialDropApduService.CLA_CUSTOM,
+                            MaterialDropApduService.INS_EXCHANGE_HELLO,
+                            0x01,
+                            sw2.toByte(),
+                            0x00
+                        )
+                        resp = isoDep.transceive(nextApdu)
+                    } else {
+                        return@execute
+                    }
+                }
+                val remoteJson = String(full.toByteArray(), StandardCharsets.UTF_8)
+                if (remoteJson.isNotEmpty()) {
+                    ProximitySessionStore.parseAndNotifyHandshake("nfc_reader", remoteJson)
+                }
+            } catch (_: Exception) {
+            } finally {
+                try { isoDep.close() } catch (_: Exception) {}
+            }
+        }
+    }
+
+    private fun isStatusOk(apduResp: ByteArray): Boolean {
+        return apduResp.size >= 2 &&
+            (apduResp[apduResp.size - 2].toInt() and 0xFF) == 0x90 &&
+            (apduResp[apduResp.size - 1].toInt() and 0xFF) == 0x00
     }
 
     private fun unregisterNsdServiceInternal() {

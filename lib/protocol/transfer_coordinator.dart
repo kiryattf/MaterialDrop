@@ -13,6 +13,8 @@ import 'engine/transport_models.dart';
 import 'engine/transport_router.dart';
 import 'lan/lan_constants.dart';
 import 'lan/lan_transport.dart';
+import 'proximity/proximity_bridge.dart';
+import 'proximity/tap_proximity_transport.dart';
 import 'quickshare/quickshare_transport.dart';
 
 class TransferCoordinator extends ChangeNotifier {
@@ -21,6 +23,7 @@ class TransferCoordinator extends ChangeNotifier {
   late final DirectTransport _directTransport;
   late final LanTransport _lanTransport;
   late final QuickShareTransport _quickShareTransport;
+  late final TapProximityTransport _tapProximityTransport;
   late final TransportRouter _router;
 
   StreamSubscription<List<DiscoveredPeer>>? _peersSub;
@@ -75,11 +78,18 @@ class TransferCoordinator extends ChangeNotifier {
       declinedMessageFn: () => settings.strings.tr('transfer_declined'),
     );
 
+    _tapProximityTransport = TapProximityTransport(
+      transferPortFn: () => lanPort,
+      localFingerprintFn: () => _lanTransport.fingerprint,
+      deviceNameFn: () => settings.deviceName,
+    );
+
     _router = TransportRouter(
       channels: [
         _directTransport,
         _lanTransport,
         _quickShareTransport,
+        _tapProximityTransport,
       ],
       isSelfFn: _isSelfDevice,
       isTrustedFn: settings.isDeviceTrusted,
@@ -102,12 +112,28 @@ class TransferCoordinator extends ChangeNotifier {
       : LanConstants.defaultPort;
 
   int get quickSharePort => _quickShareTransport.boundPort;
+  ProximityStatus get proximityStatus => _tapProximityTransport.lastStatus;
   bool get isDiscovering => _discovering;
   OutgoingTransferState get outgoingState => _outgoingState;
   IncomingTransferState get incomingState => _incomingState;
 
   void setRadarVisible(bool visible) {
     _isRadarVisible = visible;
+    unawaited(_tapProximityTransport.setRadarVisible(visible));
+  }
+
+  Future<void> refreshProximityStatus() async {
+    await _tapProximityTransport.refreshStatus();
+    notifyListeners();
+  }
+
+  Future<bool> requestProximityPermissions() async {
+    final granted = await _tapProximityTransport.requestPermissions();
+    if (granted && _discovering) {
+      await _tapProximityTransport.refreshDiscovery();
+    }
+    notifyListeners();
+    return granted;
   }
 
   Future<void> startServices() async {
@@ -130,6 +156,7 @@ class TransferCoordinator extends ChangeNotifier {
     if (settings.quickShareEnabled) {
       await _quickShareTransport.start();
     }
+    await _tapProximityTransport.start();
 
     await startDiscovery();
     notifyListeners();
@@ -176,6 +203,12 @@ class TransferCoordinator extends ChangeNotifier {
   bool _isSelfDevice(NearbyDevice device) {
     if (device.instanceId != null && device.instanceId == _instanceId) {
       return true;
+    }
+    if (device.channelId == 'tap_proximity' ||
+        device.protocol == TransferProtocol.tapProximity) {
+      return device.instanceId != null &&
+          device.instanceId!.toUpperCase() ==
+              _tapProximityTransport.localEphemeralHex;
     }
     if (device.channelId == 'lan' &&
         device.tlsFingerprint != null &&

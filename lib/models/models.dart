@@ -1,6 +1,6 @@
 import 'dart:convert';
 
-enum TransferProtocol { materialDrop, lan, quickShare }
+enum TransferProtocol { materialDrop, lan, quickShare, tapProximity }
 
 enum DeviceKind { pc, phone, tablet, usb, unknown }
 
@@ -21,6 +21,8 @@ class NearbyDevice {
   final String? channelId;
   final String? tlsFingerprint;
   final bool useHttps;
+  final int? rssi;
+  final String? proximityZone;
   final DateTime lastSeen;
 
   const NearbyDevice({
@@ -37,6 +39,8 @@ class NearbyDevice {
     this.channelId,
     this.tlsFingerprint,
     this.useHttps = false,
+    this.rssi,
+    this.proximityZone,
   });
 
   NearbyDevice copyWith({
@@ -52,6 +56,8 @@ class NearbyDevice {
     String? channelId,
     String? tlsFingerprint,
     bool? useHttps,
+    int? rssi,
+    String? proximityZone,
     DateTime? lastSeen,
   }) {
     return NearbyDevice(
@@ -67,6 +73,8 @@ class NearbyDevice {
       channelId: channelId ?? this.channelId,
       tlsFingerprint: tlsFingerprint ?? this.tlsFingerprint,
       useHttps: useHttps ?? this.useHttps,
+      rssi: rssi ?? this.rssi,
+      proximityZone: proximityZone ?? this.proximityZone,
       lastSeen: lastSeen ?? this.lastSeen,
     );
   }

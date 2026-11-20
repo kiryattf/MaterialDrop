@@ -12,6 +12,7 @@ import 'services/platform_bridge.dart';
 import 'services/settings_controller.dart';
 import 'theme/app_theme.dart';
 import 'ui/screens/home_shell.dart';
+import 'ui/widgets/dynamic_island.dart';
 
 Future<void> main(List<String> args) async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -87,9 +88,11 @@ class _MaterialDropRootState extends State<MaterialDropRoot>
   StreamSubscription<ShareLaunchPayload>? _shareSub;
   StreamSubscription<String>? _traySub;
   StreamSubscription<String>? _deepLinkSub;
+  StreamSubscription<String>? _islandActionSub;
   String? _lastNotifiedOfferId;
   String? _lastCompletedOfferId;
   String? _lastWindowTitle;
+  bool _appFocused = true;
 
   @override
   void initState() {
@@ -148,6 +151,63 @@ class _MaterialDropRootState extends State<MaterialDropRoot>
       widget.coordinator.connectIrohLink(link);
       unawaited(DesktopBridge.instance.showWindow());
     });
+    _islandActionSub =
+        DesktopBridge.instance.islandActionStream.listen(_handleIslandAction);
+  }
+
+  Future<void> _handleIslandAction(String action) async {
+    switch (action) {
+      case 'accept':
+        await widget.coordinator.acceptIncoming();
+      case 'decline':
+        widget.coordinator.declineIncoming();
+      case 'cancel':
+        await widget.coordinator.cancelIncoming();
+      case 'dismiss':
+        widget.coordinator.dismissIsland();
+      case 'open_app':
+        await DesktopBridge.instance.showWindow();
+      case 'copy':
+        final st = widget.coordinator.islandState;
+        if (st is IslandCompleted) {
+          await _copyCompleted(st.completed);
+        }
+      case 'open':
+        final st = widget.coordinator.islandState;
+        if (st is IslandCompleted) {
+          await _openCompleted(st.completed);
+        }
+      case 'folder':
+        final st = widget.coordinator.islandState;
+        if (st is IslandCompleted) {
+          await _showCompletedFolder(st.completed);
+        }
+    }
+  }
+
+  Future<void> _copyCompleted(IncomingCompleted completed) async {
+    if (completed.receivedTexts.isNotEmpty) {
+      await PlatformBridge.instance
+          .copyTextToClipboard(completed.receivedTexts.first.body);
+    } else if (completed.savedItems.isNotEmpty) {
+      await PlatformBridge.instance
+          .copyFileOrImageToClipboard(completed.savedItems.first.savedPathOrUri);
+    }
+  }
+
+  Future<void> _openCompleted(IncomingCompleted completed) async {
+    if (completed.savedItems.isNotEmpty) {
+      final first = completed.savedItems.first;
+      await PlatformBridge.instance
+          .openFile(first.savedPathOrUri, mimeType: first.mimeType);
+    }
+  }
+
+  Future<void> _showCompletedFolder(IncomingCompleted completed) async {
+    final path = completed.savedItems.isNotEmpty
+        ? completed.savedItems.first.savedPathOrUri
+        : '';
+    await PlatformBridge.instance.showInFolder(path, widget.settings.downloadDir);
   }
 
   void _syncWindowTitle() {
@@ -198,6 +258,7 @@ class _MaterialDropRootState extends State<MaterialDropRoot>
 
   void _onCoordinatorUpdated() {
     if (!DesktopBridge.instance.isDesktop) return;
+    unawaited(_syncDesktopIslandOverlay());
     final incoming = widget.coordinator.incomingState;
     if (incoming is IncomingOfferPending &&
         incoming.offer.id != _lastNotifiedOfferId) {
@@ -207,6 +268,104 @@ class _MaterialDropRootState extends State<MaterialDropRoot>
         incoming.offer.id != _lastCompletedOfferId) {
       _lastCompletedOfferId = incoming.offer.id;
       unawaited(_notifyIncomingCompleted(incoming));
+    }
+  }
+
+  Future<void> _syncDesktopIslandOverlay() async {
+    if (!DesktopBridge.instance.isDesktop) return;
+    if (!widget.settings.islandEnabled) {
+      await DesktopBridge.instance.hideDynamicIsland();
+      return;
+    }
+
+    final state = widget.coordinator.islandState;
+    final winVisible = await DesktopBridge.instance.isWindowVisible();
+    // Show floating borderless OS island whenever main window is hidden/unfocused
+    if ((winVisible && _appFocused) || state is IslandHidden) {
+      await DesktopBridge.instance.hideDynamicIsland();
+      return;
+    }
+
+    final strings = widget.settings.strings;
+    final pos = widget.settings.islandPosition.name;
+
+    switch (state) {
+      case IslandHidden():
+        await DesktopBridge.instance.hideDynamicIsland();
+      case IslandPreGesturePeek(:final preview):
+        final title = preview.fileCount > 1
+            ? '${preview.fileName} (+${preview.fileCount - 1})'
+            : preview.fileName;
+        await DesktopBridge.instance.showDynamicIsland(
+          mode: 'peek',
+          position: pos,
+          title: title,
+          subtitle: '${preview.senderName} • ${formatFileSize(preview.totalBytes)}',
+          accentColor: preview.dominantColor,
+          progress: preview.dragProgress,
+          hasProgress: false,
+          thumbnailPng: preview.thumbnailBytes,
+        );
+      case IslandOffer(:final offer, :final dominantColor, :final thumbnailBytes):
+        final count = offer.files.length + offer.texts.length;
+        await DesktopBridge.instance.showDynamicIsland(
+          mode: 'offer',
+          position: pos,
+          title: offer.pin != null
+              ? '${offer.senderName} • PIN ${offer.pin}'
+              : offer.senderName,
+          subtitle: '$count • ${formatFileSize(offer.totalSize)}',
+          accentColor: dominantColor,
+          thumbnailPng: thumbnailBytes,
+          buttons: [
+            {'action': 'decline', 'label': strings.tr('decline'), 'primary': false},
+            {'action': 'accept', 'label': strings.tr('accept'), 'primary': true},
+          ],
+        );
+      case IslandProgress(
+          :final fileName,
+          :final progress,
+          :final speedBps,
+          :final dominantColor,
+          :final thumbnailBytes,
+        ):
+        await DesktopBridge.instance.showDynamicIsland(
+          mode: 'progress',
+          position: pos,
+          title: fileName,
+          subtitle: formatSpeed(speedBps),
+          accentColor: dominantColor,
+          progress: progress,
+          hasProgress: true,
+          thumbnailPng: thumbnailBytes,
+          buttons: [
+            {'action': 'cancel', 'label': '×', 'primary': false},
+          ],
+        );
+      case IslandCompleted(
+          :final completed,
+          :final dominantColor,
+          :final thumbnailBytes,
+        ):
+        final first = completed.savedItems.isNotEmpty
+            ? completed.savedItems.first.name
+            : (completed.receivedTexts.isNotEmpty
+                ? completed.receivedTexts.first.body
+                : completed.offer.senderName);
+        await DesktopBridge.instance.showDynamicIsland(
+          mode: 'completed',
+          position: pos,
+          title: strings.tr('transfer_complete'),
+          subtitle: first,
+          accentColor: dominantColor,
+          thumbnailPng: thumbnailBytes,
+          buttons: [
+            {'action': 'copy', 'label': strings.tr('ctx_copy_path'), 'primary': false},
+            if (completed.savedItems.isNotEmpty)
+              {'action': 'open', 'label': strings.tr('open_file'), 'primary': true},
+            {'action': 'dismiss', 'label': '×', 'primary': false},
+          ],
+        );
     }
   }
 
@@ -245,6 +404,10 @@ class _MaterialDropRootState extends State<MaterialDropRoot>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    _appFocused = state == AppLifecycleState.resumed;
+    if (DesktopBridge.instance.isDesktop) {
+      unawaited(_syncDesktopIslandOverlay());
+    }
     if (state == AppLifecycleState.resumed) {
       unawaited(widget.coordinator.startDiscovery());
     } else if (state == AppLifecycleState.paused && !DesktopBridge.instance.isDesktop) {
@@ -260,6 +423,8 @@ class _MaterialDropRootState extends State<MaterialDropRoot>
     unawaited(_traySub?.cancel());
     unawaited(_shareSub?.cancel());
     unawaited(_deepLinkSub?.cancel());
+    unawaited(_islandActionSub?.cancel());
+    unawaited(DesktopBridge.instance.hideDynamicIsland());
     widget.coordinator.dispose();
     super.dispose();
   }
@@ -307,6 +472,20 @@ class _MaterialDropRootState extends State<MaterialDropRoot>
                 dynamicLight: lightDynamic,
                 dynamicDark: darkDynamic,
               ),
+              builder: (context, child) {
+                return Stack(
+                  children: [
+                    child ?? const SizedBox.shrink(),
+                    DynamicIslandOverlay(
+                      coordinator: widget.coordinator,
+                      settings: widget.settings,
+                      onCopy: _copyCompleted,
+                      onOpenFile: _openCompleted,
+                      onShowFolder: _showCompletedFolder,
+                    ),
+                  ],
+                );
+              },
               home: HomeShell(
                 settings: widget.settings,
                 coordinator: widget.coordinator,

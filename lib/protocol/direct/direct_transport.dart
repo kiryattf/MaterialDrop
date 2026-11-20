@@ -66,6 +66,7 @@ class DirectTransport implements TransportChannel {
       ),
       onCanceled: () => _eventsCtrl.add(TransportIncomingCanceled(id)),
       onError: (msg) => _eventsCtrl.add(TransportIncomingError(id, msg)),
+      onGestureEvent: (g) => _eventsCtrl.add(TransportPreGesture(id, g)),
     );
 
     _discovery = MaterialDropDiscovery(

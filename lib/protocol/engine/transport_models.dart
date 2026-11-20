@@ -1,4 +1,5 @@
 import '../../models/models.dart';
+import '../gesture/gesture_models.dart';
 
 enum TransportKind { direct, lan, quickShare, tapProximity, internetP2p }
 
@@ -147,6 +148,11 @@ final class TransportIncomingCanceled extends TransportEvent {
 final class TransportIncomingError extends TransportEvent {
   final String message;
   const TransportIncomingError(super.channelId, this.message);
+}
+
+final class TransportPreGesture extends TransportEvent {
+  final GesturePreviewEvent gesture;
+  const TransportPreGesture(super.channelId, this.gesture);
 }
 
 final class TransportOutgoingConnecting extends TransportEvent {

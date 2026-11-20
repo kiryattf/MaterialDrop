@@ -177,6 +177,59 @@ class SettingsScreen extends StatelessWidget {
                         },
                       ),
                     ),
+                    const Divider(height: 1, indent: 16, endIndent: 16),
+                    SwitchListTile(
+                      secondary: Icon(
+                        Icons.bubble_chart_rounded,
+                        color: scheme.primary,
+                      ),
+                      title: Text(strings.tr('settings_island_title')),
+                      subtitle: Text(strings.tr('settings_island_desc')),
+                      value: settings.islandEnabled,
+                      onChanged: settings.setIslandEnabled,
+                    ),
+                    if (settings.islandEnabled) ...[
+                      const Divider(height: 1, indent: 16, endIndent: 16),
+                      ListTile(
+                        leading: Icon(
+                          Icons.vertical_align_top_rounded,
+                          color: scheme.primary,
+                        ),
+                        title: Text(strings.tr('settings_island_pos')),
+                        subtitle: Padding(
+                          padding: const EdgeInsets.only(top: 8),
+                          child: SegmentedButton<IslandPosition>(
+                            segments: [
+                              ButtonSegment(
+                                value: IslandPosition.topCenter,
+                                icon: const Icon(
+                                    Icons.vertical_align_top_rounded,
+                                    size: 16),
+                                label: Text(
+                                  strings.tr('island_top'),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                              ButtonSegment(
+                                value: IslandPosition.bottomCenter,
+                                icon: const Icon(
+                                    Icons.vertical_align_bottom_rounded,
+                                    size: 16),
+                                label: Text(
+                                  strings.tr('island_bottom'),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            ],
+                            selected: {settings.islandPosition},
+                            onSelectionChanged: (sel) =>
+                                settings.setIslandPosition(sel.first),
+                          ),
+                        ),
+                      ),
+                    ],
                   ],
                 ),
               ),

@@ -63,12 +63,15 @@ class DesktopBridge {
       StreamController<String>.broadcast();
   final StreamController<String> _deepLinks =
       StreamController<String>.broadcast();
+  final StreamController<String> _islandActions =
+      StreamController<String>.broadcast();
   bool _handlerBound = false;
 
   bool get isDesktop => Platform.isWindows || Platform.isLinux;
 
   Stream<String> get trayActionStream => _trayActions.stream;
   Stream<String> get deepLinkStream => _deepLinks.stream;
+  Stream<String> get islandActionStream => _islandActions.stream;
 
   void _ensureHandler() {
     if (_handlerBound || !isDesktop) return;
@@ -84,8 +87,49 @@ class DesktopBridge {
         if (url.isNotEmpty) {
           _deepLinks.add(url);
         }
+      } else if (call.method == 'onIslandAction') {
+        final action = call.arguments as String? ?? '';
+        if (action.isNotEmpty) {
+          _islandActions.add(action);
+        }
       }
     });
+  }
+
+  Future<void> showDynamicIsland({
+    required String mode,
+    required String position,
+    required String title,
+    required String subtitle,
+    required int accentColor,
+    double progress = 0.0,
+    bool hasProgress = false,
+    Uint8List? thumbnailPng,
+    List<Map<String, dynamic>> buttons = const [],
+  }) async {
+    if (!isDesktop) return;
+    _ensureHandler();
+    try {
+      await _channel.invokeMethod('showDynamicIsland', {
+        'mode': mode,
+        'position': position,
+        'title': title,
+        'subtitle': subtitle,
+        'accentColor': accentColor,
+        'progress': progress,
+        'hasProgress': hasProgress,
+        if (thumbnailPng != null && thumbnailPng.isNotEmpty)
+          'thumbnailPng': thumbnailPng,
+        'buttons': buttons,
+      });
+    } catch (_) {}
+  }
+
+  Future<void> hideDynamicIsland() async {
+    if (!isDesktop) return;
+    try {
+      await _channel.invokeMethod('hideDynamicIsland');
+    } catch (_) {}
   }
 
   Future<void> registerUrlProtocol() async {

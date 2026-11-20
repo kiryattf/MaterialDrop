@@ -199,6 +199,11 @@ class AppStrings {
       'settings_iroh': 'Интернет P2P (Iroh QUIC)',
       'settings_iroh_desc': 'Прямая передача через интернет и релеи по ссылке materialdrop://',
       'settings_qs_native': 'Нативный движок rquickshare_core (mDNS + UKEY2) для ПК',
+      'settings_island_title': 'Динамический остров (Overlay)',
+      'settings_island_desc': 'Плавающая стеклянная капсула при входящем свайпе и передаче',
+      'settings_island_pos': 'Позиция острова',
+      'island_top': 'Сверху по центру',
+      'island_bottom': 'Снизу по центру',
     },
     'en': {
       'app_name': 'MaterialDrop',
@@ -378,6 +383,11 @@ class AppStrings {
       'settings_iroh': 'Internet P2P (Iroh QUIC)',
       'settings_iroh_desc': 'Serverless P2P transfers across networks via materialdrop:// links',
       'settings_qs_native': 'Native rquickshare_core (mDNS + UKEY2) engine on desktop',
+      'settings_island_title': 'Dynamic Island Overlay',
+      'settings_island_desc': 'Floating liquid glass pill on pre-swipe and incoming transfers',
+      'settings_island_pos': 'Island position',
+      'island_top': 'Top Center',
+      'island_bottom': 'Bottom Center',
     },
     'de': {
       'app_name': 'MaterialDrop',
@@ -558,6 +568,11 @@ class AppStrings {
       'settings_iroh': 'Internet P2P (Iroh QUIC)',
       'settings_iroh_desc': 'Direkte P2P-Übertragung über das Internet per materialdrop://-Link',
       'settings_qs_native': 'Native rquickshare_core (mDNS + UKEY2) Desktop-Engine',
+      'settings_island_title': 'Dynamic Island Overlay',
+      'settings_island_desc': 'Schwebende Liquid-Glass-Kapsel bei Vorab-Geste und Empfang',
+      'settings_island_pos': 'Position der Insel',
+      'island_top': 'Oben mittig',
+      'island_bottom': 'Unten mittig',
     },
   };
 }

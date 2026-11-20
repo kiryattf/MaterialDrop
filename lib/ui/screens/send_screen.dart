@@ -1794,6 +1794,12 @@ class _SendScreenState extends State<SendScreen> {
                   files: _stagedFiles,
                   targetDevice: device,
                   strings: strings,
+                  onPreGestureTrigger: () =>
+                      widget.coordinator.onSwipePreTrigger(device, _stagedFiles),
+                  onDragProgress: (prog) => widget.coordinator
+                      .onSwipeProgress(device, _stagedFiles, prog),
+                  onPreGestureCancel: () =>
+                      widget.coordinator.onSwipeCancel(device),
                   onThrowSuccess: () {
                     widget.coordinator.sendFiles(device, _stagedFiles);
                   },

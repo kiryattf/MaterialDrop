@@ -7,6 +7,7 @@ import 'package:path/path.dart' as p;
 
 import '../../models/models.dart';
 import '../../services/platform_bridge.dart';
+import '../gesture/gesture_models.dart';
 import 'md_constants.dart';
 
 class MaterialDropReceiver {
@@ -38,6 +39,7 @@ class MaterialDropReceiver {
   ) onCompleted;
   final void Function() onCanceled;
   final void Function(String message) onError;
+  final void Function(GesturePreviewEvent event)? onGestureEvent;
 
   Completer<bool>? _decisionCompleter;
 
@@ -54,6 +56,7 @@ class MaterialDropReceiver {
     required this.onCompleted,
     required this.onCanceled,
     required this.onError,
+    this.onGestureEvent,
   });
 
   int get port => _boundPort;
@@ -148,6 +151,12 @@ class MaterialDropReceiver {
     final path = request.uri.path;
     final method = request.method.toUpperCase();
 
+    if (path == '/ws/gesture' &&
+        WebSocketTransformer.isUpgradeRequest(request)) {
+      await _handleGestureWebSocket(request);
+      return;
+    }
+
     if (method == 'GET' && path == '/ping') {
       final body = jsonEncode({
         'name': deviceName,
@@ -170,6 +179,23 @@ class MaterialDropReceiver {
 
     request.response.statusCode = HttpStatus.notFound;
     await request.response.close();
+  }
+
+  Future<void> _handleGestureWebSocket(HttpRequest request) async {
+    try {
+      final ws = await WebSocketTransformer.upgrade(request);
+      ws.listen(
+        (msg) {
+          if (msg is String) {
+            final parsed = GesturePreviewEvent.fromJsonString(msg);
+            if (parsed != null) {
+              onGestureEvent?.call(parsed);
+            }
+          }
+        },
+        onError: (_) {},
+      );
+    } catch (_) {}
   }
 
   Future<void> _handleUpload(HttpRequest request) async {

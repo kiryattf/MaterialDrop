@@ -8,6 +8,8 @@ enum TransferDirection { incoming, outgoing }
 
 enum AppThemeStyle { system, light, dark, oled }
 
+enum IslandPosition { topCenter, bottomCenter }
+
 class NearbyDevice {
   final String id;
   final String name;

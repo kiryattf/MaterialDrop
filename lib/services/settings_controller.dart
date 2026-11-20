@@ -18,6 +18,8 @@ class SettingsController extends ChangeNotifier {
   static const _kSoundsEnabled = 'md_sounds_enabled';
   static const _kClipboardSync = 'md_clipboard_sync';
   static const _kMinimizeToTray = 'md_minimize_to_tray';
+  static const _kIslandEnabled = 'md_island_enabled';
+  static const _kIslandPosition = 'md_island_position';
   static const _kDownloadDir = 'md_download_dir';
   static const _kTrustedDevices = 'md_trusted_devices';
   static const _kHistory = 'md_history';
@@ -41,6 +43,8 @@ class SettingsController extends ChangeNotifier {
   bool _soundsEnabled = true;
   bool _clipboardSync = true;
   bool _minimizeToTray = true;
+  bool _islandEnabled = true;
+  IslandPosition _islandPosition = IslandPosition.topCenter;
   String _downloadDir = '';
   Set<String> _trustedDevices = {};
   List<HistoryEntry> _history = [];
@@ -58,6 +62,8 @@ class SettingsController extends ChangeNotifier {
   bool get soundsEnabled => _soundsEnabled;
   bool get clipboardSync => _clipboardSync;
   bool get minimizeToTray => _minimizeToTray;
+  bool get islandEnabled => _islandEnabled;
+  IslandPosition get islandPosition => _islandPosition;
   String get downloadDir => _downloadDir;
   Set<String> get trustedDevices => Set.unmodifiable(_trustedDevices);
   List<HistoryEntry> get history => List.unmodifiable(_history);
@@ -90,6 +96,12 @@ class SettingsController extends ChangeNotifier {
     _soundsEnabled = _prefs?.getBool(_k(_kSoundsEnabled)) ?? true;
     _clipboardSync = _prefs?.getBool(_k(_kClipboardSync)) ?? true;
     _minimizeToTray = _prefs?.getBool(_k(_kMinimizeToTray)) ?? true;
+    _islandEnabled = _prefs?.getBool(_k(_kIslandEnabled)) ?? true;
+    final posStr = _prefs?.getString(_k(_kIslandPosition));
+    _islandPosition = IslandPosition.values.firstWhere(
+      (e) => e.name == posStr,
+      orElse: () => IslandPosition.topCenter,
+    );
 
     _downloadDir = _prefs?.getString(_k(_kDownloadDir)) ?? '';
     if (_downloadDir.isEmpty) {
@@ -201,6 +213,18 @@ class SettingsController extends ChangeNotifier {
   Future<void> setMinimizeToTray(bool val) async {
     _minimizeToTray = val;
     await _prefs?.setBool(_k(_kMinimizeToTray), val);
+    notifyListeners();
+  }
+
+  Future<void> setIslandEnabled(bool val) async {
+    _islandEnabled = val;
+    await _prefs?.setBool(_k(_kIslandEnabled), val);
+    notifyListeners();
+  }
+
+  Future<void> setIslandPosition(IslandPosition pos) async {
+    _islandPosition = pos;
+    await _prefs?.setString(_k(_kIslandPosition), pos.name);
     notifyListeners();
   }
 

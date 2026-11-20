@@ -7,10 +7,14 @@ import '../models/models.dart';
 import '../services/platform_bridge.dart';
 import '../services/settings_controller.dart';
 import '../services/sound_service.dart';
+import '../ui/widgets/dynamic_island.dart';
 import 'direct/direct_transport.dart';
 import 'direct/md_constants.dart';
 import 'engine/transport_models.dart';
 import 'engine/transport_router.dart';
+import 'gesture/gesture_client.dart';
+import 'gesture/gesture_models.dart';
+import 'gesture/preview_extractor.dart';
 import 'iroh/internet_p2p_transport.dart';
 import 'lan/lan_constants.dart';
 import 'lan/lan_transport.dart';
@@ -43,9 +47,13 @@ class TransferCoordinator extends ChangeNotifier {
 
   OutgoingTransferState _outgoingState = const OutgoingIdle();
   IncomingTransferState _incomingState = const IncomingIdle();
+  DynamicIslandState _islandState = const IslandHidden();
+  final GestureClient _gestureClient = GestureClient();
   String? _activeIncomingChannelId;
   String? _activeIncomingOfferId;
   Timer? _autoResetOutgoingTimer;
+  Timer? _islandAutoHideTimer;
+  GesturePreviewEvent? _lastPeekPreview;
 
   TransferCoordinator({required this.settings}) {
     final launch = settings.launchConfig;
@@ -153,6 +161,63 @@ class TransferCoordinator extends ChangeNotifier {
   bool get isDiscovering => _discovering;
   OutgoingTransferState get outgoingState => _outgoingState;
   IncomingTransferState get incomingState => _incomingState;
+  DynamicIslandState get islandState => _islandState;
+
+  void dismissIsland() {
+    _islandAutoHideTimer?.cancel();
+    _islandState = const IslandHidden();
+    notifyListeners();
+  }
+
+  Future<void> onSwipePreTrigger(
+    NearbyDevice device,
+    List<StagedFile> files,
+  ) async {
+    if (files.isEmpty) return;
+    final preview = await PreviewExtractor.extractForStaged(files);
+    final totalBytes = files.fold<int>(0, (s, f) => s + f.size);
+    final event = GesturePreviewEvent(
+      eventType: 'drop_gesture_trigger',
+      senderName: settings.deviceName,
+      fileName: files.first.name,
+      fileCount: files.length,
+      totalBytes: totalBytes,
+      mimeType: files.first.mimeType,
+      dominantColor: preview.dominantColor,
+      thumbnailBytes: preview.thumbnailBytes,
+      dragProgress: 0.25,
+    );
+    await _gestureClient.sendTrigger(device, event);
+  }
+
+  Future<void> onSwipeProgress(
+    NearbyDevice device,
+    List<StagedFile> files,
+    double dragProgress,
+  ) async {
+    if (files.isEmpty) return;
+    final preview = await PreviewExtractor.extractForStaged(files);
+    final totalBytes = files.fold<int>(0, (s, f) => s + f.size);
+    final event = GesturePreviewEvent(
+      eventType: 'drop_gesture_progress',
+      senderName: settings.deviceName,
+      fileName: files.first.name,
+      fileCount: files.length,
+      totalBytes: totalBytes,
+      mimeType: files.first.mimeType,
+      dominantColor: preview.dominantColor,
+      thumbnailBytes: preview.thumbnailBytes,
+      dragProgress: dragProgress,
+    );
+    await _gestureClient.sendProgress(device, event);
+  }
+
+  Future<void> onSwipeCancel(NearbyDevice device) async {
+    await _gestureClient.sendCancel(
+      device,
+      senderName: settings.deviceName,
+    );
+  }
 
   void setRadarVisible(bool visible) {
     _isRadarVisible = visible;
@@ -414,7 +479,37 @@ class TransferCoordinator extends ChangeNotifier {
         _outgoingState = OutgoingError(message);
         unawaited(SoundService.instance.play(AppSound.failed));
         notifyListeners();
+      case TransportPreGesture(:final gesture):
+        _handlePreGesture(gesture);
     }
+  }
+
+  void _handlePreGesture(GesturePreviewEvent gesture) {
+    if (gesture.isCancel) {
+      if (_islandState is IslandPreGesturePeek) {
+        _islandAutoHideTimer?.cancel();
+        _islandState = const IslandHidden();
+        notifyListeners();
+      }
+      _lastPeekPreview = null;
+      return;
+    }
+
+    if (_incomingState is! IncomingIdle && _incomingState is! IncomingError) {
+      return;
+    }
+
+    _lastPeekPreview = gesture;
+    _islandState = IslandPreGesturePeek(gesture);
+    _islandAutoHideTimer?.cancel();
+    _islandAutoHideTimer = Timer(const Duration(seconds: 6), () {
+      if (_islandState is IslandPreGesturePeek) {
+        _islandState = const IslandHidden();
+        _lastPeekPreview = null;
+        notifyListeners();
+      }
+    });
+    notifyListeners();
   }
 
   // ---------------------------------------------------------------------------
@@ -478,6 +573,13 @@ class TransferCoordinator extends ChangeNotifier {
   void _handleIncomingOffer(String channelId, IncomingOffer offer) {
     _activeIncomingChannelId = channelId;
     _activeIncomingOfferId = offer.id;
+    _islandAutoHideTimer?.cancel();
+    final peek = _lastPeekPreview;
+    final domColor = peek?.dominantColor ??
+        PreviewExtractor.fallbackColorForMime(
+          offer.files.isNotEmpty ? offer.files.first.mimeType : '',
+        );
+    final thumb = peek?.thumbnailBytes;
     final autoAccepted = settings.autoAcceptAll ||
         offer.isUsb ||
         (offer.isTrusted && settings.autoAcceptTrusted);
@@ -492,8 +594,23 @@ class TransferCoordinator extends ChangeNotifier {
         totalBytes: offer.totalSize,
         speedBps: 0,
       );
+      _islandState = IslandProgress(
+        offer: offer,
+        fileName: offer.files.isNotEmpty ? offer.files.first.name : '...',
+        progress: 0,
+        bytesReceived: 0,
+        totalBytes: offer.totalSize,
+        speedBps: 0,
+        dominantColor: domColor,
+        thumbnailBytes: thumb,
+      );
     } else {
       _incomingState = IncomingOfferPending(offer);
+      _islandState = IslandOffer(
+        offer: offer,
+        dominantColor: domColor,
+        thumbnailBytes: thumb,
+      );
       unawaited(SoundService.instance.play(AppSound.receiving));
       unawaited(SoundService.instance.haptic(HapticKind.heavy));
     }
@@ -523,6 +640,19 @@ class TransferCoordinator extends ChangeNotifier {
       totalBytes: totalBytes,
       speedBps: speedBps,
     );
+    _islandState = IslandProgress(
+      offer: offer,
+      fileName: fileName,
+      progress: prog,
+      bytesReceived: bytesReceived,
+      totalBytes: totalBytes,
+      speedBps: speedBps,
+      dominantColor: _lastPeekPreview?.dominantColor ??
+          PreviewExtractor.fallbackColorForMime(
+            offer.files.isNotEmpty ? offer.files.first.mimeType : '',
+          ),
+      thumbnailBytes: _lastPeekPreview?.thumbnailBytes,
+    );
     notifyListeners();
   }
 
@@ -531,11 +661,30 @@ class TransferCoordinator extends ChangeNotifier {
     List<IncomingTransferItem> items,
     List<IncomingTextItem> texts,
   ) {
-    _incomingState = IncomingCompleted(
+    final completedState = IncomingCompleted(
       offer: offer,
       savedItems: items,
       receivedTexts: texts,
     );
+    _incomingState = completedState;
+    final doneColor = _lastPeekPreview?.dominantColor ??
+        PreviewExtractor.fallbackColorForMime(
+          items.isNotEmpty ? items.first.mimeType : '',
+        );
+    final doneThumb = _lastPeekPreview?.thumbnailBytes;
+    _lastPeekPreview = null;
+    _islandState = IslandCompleted(
+      completed: completedState,
+      dominantColor: doneColor,
+      thumbnailBytes: doneThumb,
+    );
+    _islandAutoHideTimer?.cancel();
+    _islandAutoHideTimer = Timer(const Duration(seconds: 7), () {
+      if (_islandState is IslandCompleted) {
+        _islandState = const IslandHidden();
+        notifyListeners();
+      }
+    });
     _activeIncomingChannelId = null;
     _activeIncomingOfferId = null;
     unawaited(PlatformBridge.instance.stopForegroundTransfer());
@@ -593,6 +742,9 @@ class TransferCoordinator extends ChangeNotifier {
 
   void _handleIncomingCanceled() {
     _incomingState = const IncomingIdle();
+    _islandAutoHideTimer?.cancel();
+    _islandState = const IslandHidden();
+    _lastPeekPreview = null;
     _activeIncomingChannelId = null;
     _activeIncomingOfferId = null;
     unawaited(PlatformBridge.instance.stopForegroundTransfer());
@@ -601,6 +753,9 @@ class TransferCoordinator extends ChangeNotifier {
 
   void _handleIncomingError(String message) {
     _incomingState = IncomingError(message);
+    _islandAutoHideTimer?.cancel();
+    _islandState = const IslandHidden();
+    _lastPeekPreview = null;
     _activeIncomingChannelId = null;
     _activeIncomingOfferId = null;
     unawaited(PlatformBridge.instance.stopForegroundTransfer());
@@ -641,6 +796,9 @@ class TransferCoordinator extends ChangeNotifier {
     final offerId = _activeIncomingOfferId ?? '';
     unawaited(_router.declineIncoming(channelId, offerId));
     _incomingState = const IncomingIdle();
+    _islandAutoHideTimer?.cancel();
+    _islandState = const IslandHidden();
+    _lastPeekPreview = null;
     _activeIncomingChannelId = null;
     _activeIncomingOfferId = null;
     unawaited(PlatformBridge.instance.stopForegroundTransfer());
@@ -655,6 +813,9 @@ class TransferCoordinator extends ChangeNotifier {
       await _router.cancelIncoming(channelId, offerId: offerId);
     }
     _incomingState = const IncomingIdle();
+    _islandAutoHideTimer?.cancel();
+    _islandState = const IslandHidden();
+    _lastPeekPreview = null;
     _activeIncomingChannelId = null;
     _activeIncomingOfferId = null;
     unawaited(PlatformBridge.instance.stopForegroundTransfer());
@@ -669,6 +830,8 @@ class TransferCoordinator extends ChangeNotifier {
   @override
   void dispose() {
     _autoResetOutgoingTimer?.cancel();
+    _islandAutoHideTimer?.cancel();
+    unawaited(_gestureClient.close());
     unawaited(_peersSub?.cancel());
     unawaited(_eventsSub?.cancel());
     unawaited(_router.dispose());

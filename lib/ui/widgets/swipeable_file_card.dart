@@ -1,18 +1,27 @@
+import 'dart:async';
+
 import 'package:flutter/physics.dart';
+import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart';
 
 import '../../l10n/app_strings.dart';
 import '../../models/models.dart';
+import '../../protocol/gesture/preview_extractor.dart';
 import '../../services/sound_service.dart';
 import '../../theme/app_theme.dart';
 import '../motion/md3_springs.dart';
 
 /// Expressive playing-card style file preview with spring-physics Swipe-to-Throw.
 class SwipeableFileCard extends StatefulWidget {
+  static const double throwThresholdPx = 115.0;
+
   final List<StagedFile> files;
   final NearbyDevice targetDevice;
   final AppStrings strings;
   final VoidCallback onThrowSuccess;
+  final VoidCallback? onPreGestureTrigger;
+  final void Function(double dragProgress)? onDragProgress;
+  final VoidCallback? onPreGestureCancel;
 
   const SwipeableFileCard({
     super.key,
@@ -20,6 +29,9 @@ class SwipeableFileCard extends StatefulWidget {
     required this.targetDevice,
     required this.strings,
     required this.onThrowSuccess,
+    this.onPreGestureTrigger,
+    this.onDragProgress,
+    this.onPreGestureCancel,
   });
 
   @override
@@ -31,12 +43,14 @@ class _SwipeableFileCardState extends State<SwipeableFileCard>
   late final AnimationController _xCtrl;
   late final AnimationController _yCtrl;
   bool _thrown = false;
+  bool _preTriggered = false;
 
   @override
   void initState() {
     super.initState();
     _xCtrl = AnimationController.unbounded(vsync: this, value: 0.0);
     _yCtrl = AnimationController.unbounded(vsync: this, value: 0.0);
+    unawaited(PreviewExtractor.extractForStaged(widget.files));
   }
 
   @override
@@ -45,11 +59,13 @@ class _SwipeableFileCardState extends State<SwipeableFileCard>
     if (oldWidget.files != widget.files ||
         oldWidget.targetDevice.id != widget.targetDevice.id) {
       _resetCard();
+      unawaited(PreviewExtractor.extractForStaged(widget.files));
     }
   }
 
   void _resetCard() {
     _thrown = false;
+    _preTriggered = false;
     _xCtrl.value = 0.0;
     _yCtrl.value = 0.0;
   }
@@ -82,6 +98,10 @@ class _SwipeableFileCardState extends State<SwipeableFileCard>
   }
 
   void _snapBack(Velocity velocity) {
+    if (_preTriggered) {
+      _preTriggered = false;
+      widget.onPreGestureCancel?.call();
+    }
     final simX = SpringSimulation(
       Md3Springs.bouncySpatial,
       _xCtrl.value,
@@ -135,6 +155,16 @@ class _SwipeableFileCardState extends State<SwipeableFileCard>
             if (_thrown) return;
             _xCtrl.value += details.delta.dx * 0.78;
             _yCtrl.value += details.delta.dy * 0.88;
+            final dragProgress =
+                (-_yCtrl.value / SwipeableFileCard.throwThresholdPx)
+                    .clamp(0.0, 1.0);
+            if (!_preTriggered && dragProgress >= 0.20) {
+              _preTriggered = true;
+              unawaited(HapticFeedback.heavyImpact());
+              widget.onPreGestureTrigger?.call();
+            } else if (_preTriggered) {
+              widget.onDragProgress?.call(dragProgress);
+            }
           },
           onPanCancel: () {
             if (!_thrown) _snapBack(Velocity.zero);
@@ -142,7 +172,7 @@ class _SwipeableFileCardState extends State<SwipeableFileCard>
           onPanEnd: (details) {
             if (_thrown) return;
             final vy = details.velocity.pixelsPerSecond.dy;
-            if (vy < -600 || _yCtrl.value < -115) {
+            if (vy < -600 || _yCtrl.value < -SwipeableFileCard.throwThresholdPx) {
               _launchThrow(initialVelocityY: vy);
             } else {
               _snapBack(details.velocity);

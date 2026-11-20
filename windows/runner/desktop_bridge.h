@@ -12,11 +12,13 @@
 #include <string>
 
 #include "ble_proximity_win.h"
+#include "dynamic_island_win.h"
 
 class DesktopBridge {
  public:
   static constexpr UINT kTrayCallbackMessage = WM_APP + 100;
   static constexpr UINT kBlePeerMessage = WM_APP + 101;
+  static constexpr UINT kIslandActionMessage = WM_APP + 102;
   static constexpr ULONG_PTR kDeepLinkCopyDataTag = 0x4D445552;  // 'MDUR'
 
   DesktopBridge(HWND hwnd, flutter::BinaryMessenger* messenger);
@@ -46,6 +48,7 @@ class DesktopBridge {
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
       proximity_channel_;
   std::unique_ptr<BleProximityWin> ble_win_;
+  std::unique_ptr<DynamicIslandWin> island_win_;
   bool tray_created_ = false;
   bool minimize_to_tray_ = true;
   bool auto_accept_ = false;

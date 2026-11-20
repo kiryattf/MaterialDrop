@@ -8,6 +8,7 @@ import 'package:path/path.dart' as p;
 import '../../models/models.dart';
 import '../../services/platform_bridge.dart';
 import '../direct/md_constants.dart';
+import '../gesture/gesture_models.dart';
 import 'lan_constants.dart';
 import 'tls_identity.dart';
 
@@ -74,6 +75,7 @@ class LanReceiver {
       onCompleted;
   void Function() onCanceled;
   void Function(String message) onError;
+  void Function(GesturePreviewEvent event)? onGestureEvent;
 
   Completer<bool>? _decisionCompleter;
   _ActiveLanSession? _activeSession;
@@ -91,6 +93,7 @@ class LanReceiver {
     required this.onCompleted,
     required this.onCanceled,
     required this.onError,
+    this.onGestureEvent,
   });
 
   int get port => _boundPort;
@@ -196,6 +199,23 @@ class LanReceiver {
     final method = request.method.toUpperCase();
 
     try {
+      if (path == '/ws/gesture' &&
+          WebSocketTransformer.isUpgradeRequest(request)) {
+        final ws = await WebSocketTransformer.upgrade(request);
+        ws.listen(
+          (msg) {
+            if (msg is String) {
+              final parsed = GesturePreviewEvent.fromJsonString(msg);
+              if (parsed != null) {
+                onGestureEvent?.call(parsed);
+              }
+            }
+          },
+          onError: (_) {},
+        );
+        return;
+      }
+
       if (method == 'GET' && path == LanConstants.pathInfo) {
         request.response.statusCode = HttpStatus.ok;
         request.response.headers.contentType = ContentType.json;

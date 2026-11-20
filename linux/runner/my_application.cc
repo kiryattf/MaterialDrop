@@ -1,9 +1,11 @@
 #include "my_application.h"
 
+#include <cairo/cairo.h>
 #include <dlfcn.h>
 #include <flutter_linux/flutter_linux.h>
 #include <unistd.h>
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -99,6 +101,50 @@ bool LookupBool(FlValue* map, const char* key, bool def) {
 
 }  // namespace
 
+struct LayerShellApi {
+  void* handle = nullptr;
+  void (*init_for_window)(GtkWindow* window) = nullptr;
+  void (*set_layer)(GtkWindow* window, int layer) = nullptr;
+  void (*set_anchor)(GtkWindow* window, int edge, gboolean anchor) = nullptr;
+  void (*set_margin)(GtkWindow* window, int edge, int margin) = nullptr;
+  void (*set_keyboard_mode)(GtkWindow* window, int mode) = nullptr;
+  void (*set_namespace)(GtkWindow* window, const char* name_space) = nullptr;
+  gboolean (*is_supported)(void) = nullptr;
+
+  bool Load() {
+    if (handle != nullptr) return init_for_window != nullptr;
+    const char* libs[] = {
+        "libgtk-layer-shell.so.0",
+        "libgtk-layer-shell.so",
+    };
+    for (const char* lib : libs) {
+      handle = dlopen(lib, RTLD_LAZY);
+      if (handle != nullptr) {
+        init_for_window = reinterpret_cast<void (*)(GtkWindow*)>(
+            dlsym(handle, "gtk_layer_init_for_window"));
+        set_layer = reinterpret_cast<void (*)(GtkWindow*, int)>(
+            dlsym(handle, "gtk_layer_set_layer"));
+        set_anchor = reinterpret_cast<void (*)(GtkWindow*, int, gboolean)>(
+            dlsym(handle, "gtk_layer_set_anchor"));
+        set_margin = reinterpret_cast<void (*)(GtkWindow*, int, int)>(
+            dlsym(handle, "gtk_layer_set_margin"));
+        set_keyboard_mode = reinterpret_cast<void (*)(GtkWindow*, int)>(
+            dlsym(handle, "gtk_layer_set_keyboard_mode"));
+        set_namespace = reinterpret_cast<void (*)(GtkWindow*, const char*)>(
+            dlsym(handle, "gtk_layer_set_namespace"));
+        is_supported = reinterpret_cast<gboolean (*)(void)>(
+            dlsym(handle, "gtk_layer_is_supported"));
+        if (init_for_window && set_layer && set_anchor && set_margin) {
+          return true;
+        }
+        dlclose(handle);
+        handle = nullptr;
+      }
+    }
+    return false;
+  }
+};
+
 struct _MyApplication {
   GtkApplication parent_instance;
   char** dart_entrypoint_arguments;
@@ -123,9 +169,289 @@ struct _MyApplication {
   bool sounds_enabled;
   bool suppress_toggle_signal;
   bool quitting;
+  LayerShellApi layer_api;
+  GtkWindow* island_window;
+  GtkWidget* island_box;
+  GtkWidget* island_thumb_image;
+  GtkWidget* island_title_label;
+  GtkWidget* island_sub_label;
+  GtkWidget* island_progress_bar;
+  GtkWidget* island_buttons_box;
+  guint32 island_accent_argb;
+  std::string island_position;
+  bool island_layer_inited;
 };
 
 G_DEFINE_TYPE(MyApplication, my_application, GTK_TYPE_APPLICATION)
+
+static void emit_island_action(MyApplication* self, const char* action) {
+  if (!self->desktop_channel || !action) return;
+  g_autoptr(FlValue) arg = fl_value_new_string(action);
+  fl_method_channel_invoke_method(self->desktop_channel, "onIslandAction", arg,
+                                  nullptr, nullptr, nullptr);
+}
+
+static void on_island_button_clicked(GtkButton* btn, gpointer user_data) {
+  auto* self = MY_APPLICATION(user_data);
+  const gchar* act =
+      static_cast<const gchar*>(g_object_get_data(G_OBJECT(btn), "md_action"));
+  if (act) {
+    emit_island_action(self, act);
+  }
+}
+
+static gboolean on_island_draw(GtkWidget* widget, cairo_t* cr,
+                               gpointer user_data) {
+  auto* self = MY_APPLICATION(user_data);
+  const int w = gtk_widget_get_allocated_width(widget);
+  const int h = gtk_widget_get_allocated_height(widget);
+  if (w <= 4 || h <= 4) return FALSE;
+
+  cairo_save(cr);
+  cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
+  cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.0);
+  cairo_paint(cr);
+  cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+
+  const double pad = 4.0;
+  const double rw = static_cast<double>(w) - pad * 2.0;
+  const double rh = static_cast<double>(h) - pad * 2.0;
+  const double r = std::min(28.0, rh * 0.5);
+  const double pi = 3.14159265358979323846;
+
+  auto build_pill_path = [&]() {
+    cairo_new_sub_path(cr);
+    cairo_arc(cr, pad + rw - r, pad + r, r, -pi / 2.0, 0.0);
+    cairo_arc(cr, pad + rw - r, pad + rh - r, r, 0.0, pi / 2.0);
+    cairo_arc(cr, pad + r, pad + rh - r, r, pi / 2.0, pi);
+    cairo_arc(cr, pad + r, pad + r, r, pi, 3.0 * pi / 2.0);
+    cairo_close_path(cr);
+  };
+
+  build_pill_path();
+  cairo_set_source_rgba(cr, 0.08, 0.09, 0.13, 0.92);
+  cairo_fill_preserve(cr);
+
+  const double ar = ((self->island_accent_argb >> 16) & 0xFF) / 255.0;
+  const double ag = ((self->island_accent_argb >> 8) & 0xFF) / 255.0;
+  const double ab = (self->island_accent_argb & 0xFF) / 255.0;
+  cairo_set_source_rgba(cr, ar, ag, ab, 0.85);
+  cairo_set_line_width(cr, 1.8);
+  cairo_stroke(cr);
+
+  cairo_restore(cr);
+  return FALSE;
+}
+
+static void apply_island_anchor(MyApplication* self, const std::string& pos) {
+  if (!self->island_window) return;
+  const bool is_bottom = (pos == "bottomCenter");
+  if (self->island_layer_inited && self->layer_api.set_anchor &&
+      self->layer_api.set_margin) {
+    // GTK_LAYER_SHELL_EDGE_TOP = 2, GTK_LAYER_SHELL_EDGE_BOTTOM = 3
+    self->layer_api.set_anchor(self->island_window, 2, is_bottom ? FALSE : TRUE);
+    self->layer_api.set_anchor(self->island_window, 3, is_bottom ? TRUE : FALSE);
+    self->layer_api.set_margin(self->island_window, 2, is_bottom ? 0 : 16);
+    self->layer_api.set_margin(self->island_window, 3, is_bottom ? 16 : 0);
+  } else {
+    GdkDisplay* dpy = gtk_widget_get_display(GTK_WIDGET(self->island_window));
+    GdkMonitor* mon = dpy ? gdk_display_get_primary_monitor(dpy) : nullptr;
+    if (mon) {
+      GdkRectangle work{};
+      gdk_monitor_get_workarea(mon, &work);
+      int win_w = 420;
+      int win_h = 68;
+      gtk_window_get_size(self->island_window, &win_w, &win_h);
+      const int x = work.x + (work.width - win_w) / 2;
+      const int y = is_bottom ? (work.y + work.height - win_h - 16)
+                              : (work.y + 16);
+      gtk_window_move(self->island_window, x, y);
+    }
+  }
+}
+
+static void ensure_linux_island_window(MyApplication* self) {
+  if (self->island_window) return;
+
+  GtkWidget* win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+  self->island_window = GTK_WINDOW(win);
+  gtk_window_set_decorated(self->island_window, FALSE);
+  gtk_window_set_skip_taskbar_hint(self->island_window, TRUE);
+  gtk_window_set_skip_pager_hint(self->island_window, TRUE);
+  gtk_window_set_resizable(self->island_window, FALSE);
+  gtk_window_set_accept_focus(self->island_window, FALSE);
+  gtk_widget_set_app_paintable(win, TRUE);
+
+  GdkScreen* screen = gtk_widget_get_screen(win);
+  GdkVisual* visual = screen ? gdk_screen_get_rgba_visual(screen) : nullptr;
+  if (visual) {
+    gtk_widget_set_visual(win, visual);
+  }
+
+  // Wayland / Hyprland: use gtk-layer-shell OVERLAY layer to prevent tiling
+  if (self->layer_api.Load()) {
+    gboolean supported =
+        self->layer_api.is_supported ? self->layer_api.is_supported() : TRUE;
+    if (supported) {
+      self->layer_api.init_for_window(self->island_window);
+      // GTK_LAYER_SHELL_LAYER_OVERLAY = 3
+      self->layer_api.set_layer(self->island_window, 3);
+      if (self->layer_api.set_namespace) {
+        self->layer_api.set_namespace(self->island_window,
+                                      "materialdrop-island");
+      }
+      if (self->layer_api.set_keyboard_mode) {
+        self->layer_api.set_keyboard_mode(self->island_window, 0);
+      }
+      self->island_layer_inited = true;
+    }
+  }
+  if (!self->island_layer_inited) {
+    gtk_window_set_keep_above(self->island_window, TRUE);
+    gtk_window_set_type_hint(self->island_window,
+                             GDK_WINDOW_TYPE_HINT_NOTIFICATION);
+  }
+
+  g_signal_connect(win, "draw", G_CALLBACK(on_island_draw), self);
+
+  self->island_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+  gtk_container_set_border_width(GTK_CONTAINER(self->island_box), 14);
+  gtk_container_add(GTK_CONTAINER(win), self->island_box);
+
+  self->island_thumb_image = gtk_image_new();
+  gtk_widget_set_size_request(self->island_thumb_image, 36, 36);
+  gtk_box_pack_start(GTK_BOX(self->island_box), self->island_thumb_image, FALSE,
+                     FALSE, 0);
+
+  GtkWidget* text_col = gtk_box_new(GTK_ORIENTATION_VERTICAL, 3);
+  gtk_widget_set_size_request(text_col, 175, -1);
+  self->island_title_label = gtk_label_new("");
+  gtk_label_set_xalign(GTK_LABEL(self->island_title_label), 0.0f);
+  gtk_label_set_ellipsize(GTK_LABEL(self->island_title_label),
+                          PANGO_ELLIPSIZE_END);
+  self->island_sub_label = gtk_label_new("");
+  gtk_label_set_xalign(GTK_LABEL(self->island_sub_label), 0.0f);
+  gtk_label_set_ellipsize(GTK_LABEL(self->island_sub_label),
+                          PANGO_ELLIPSIZE_END);
+  self->island_progress_bar = gtk_progress_bar_new();
+  gtk_box_pack_start(GTK_BOX(text_col), self->island_title_label, FALSE, FALSE,
+                     0);
+  gtk_box_pack_start(GTK_BOX(text_col), self->island_sub_label, FALSE, FALSE,
+                     0);
+  gtk_box_pack_start(GTK_BOX(text_col), self->island_progress_bar, FALSE,
+                     FALSE, 0);
+  gtk_box_pack_start(GTK_BOX(self->island_box), text_col, TRUE, TRUE, 0);
+
+  self->island_buttons_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+  gtk_box_pack_end(GTK_BOX(self->island_box), self->island_buttons_box, FALSE,
+                   FALSE, 0);
+
+  g_autoptr(GtkCssProvider) css = gtk_css_provider_new();
+  gtk_css_provider_load_from_data(
+      css,
+      "label { color: #ffffff; }"
+      "button { background: rgba(255,255,255,0.16); color: #ffffff; "
+      "border: none; border-radius: 14px; padding: 4px 10px; font-weight: 600; }",
+      -1, nullptr);
+  gtk_style_context_add_provider_for_screen(
+      screen, GTK_STYLE_PROVIDER(css),
+      GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+}
+
+static void show_linux_island(MyApplication* self, FlValue* args) {
+  ensure_linux_island_window(self);
+  if (!self->island_window) return;
+
+  const gchar* title = LookupString(args, "title", "MaterialDrop");
+  const gchar* subtitle = LookupString(args, "subtitle", "");
+  const gchar* pos = LookupString(args, "position", "topCenter");
+  bool has_progress = LookupBool(args, "hasProgress", false);
+  double progress = 0.0;
+  FlValue* pv = fl_value_lookup_string(args, "progress");
+  if (pv && fl_value_get_type(pv) == FL_VALUE_TYPE_FLOAT) {
+    progress = fl_value_get_float(pv);
+  }
+  FlValue* ac = fl_value_lookup_string(args, "accentColor");
+  if (ac && fl_value_get_type(ac) == FL_VALUE_TYPE_INT) {
+    self->island_accent_argb =
+        static_cast<guint32>(fl_value_get_int(ac) & 0xFFFFFFFF);
+  }
+
+  g_autofree gchar* markup =
+      g_markup_printf_escaped("<b>%s</b>", title ? title : "");
+  gtk_label_set_markup(GTK_LABEL(self->island_title_label), markup);
+  gtk_label_set_text(GTK_LABEL(self->island_sub_label),
+                     subtitle ? subtitle : "");
+  gtk_widget_set_visible(self->island_sub_label,
+                         subtitle && subtitle[0] != '\0');
+  gtk_widget_set_visible(self->island_progress_bar, has_progress);
+  if (has_progress) {
+    gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(self->island_progress_bar),
+                                  std::max(0.02, std::min(1.0, progress)));
+  }
+
+  // Decode optional 32x32 PNG thumbnail
+  FlValue* th = fl_value_lookup_string(args, "thumbnailPng");
+  if (th && fl_value_get_type(th) == FL_VALUE_TYPE_UINT8_LIST &&
+      fl_value_get_length(th) > 0) {
+    GdkPixbufLoader* loader = gdk_pixbuf_loader_new();
+    g_autoptr(GError) perr = nullptr;
+    if (gdk_pixbuf_loader_write(loader, fl_value_get_uint8_list(th),
+                                fl_value_get_length(th), &perr) &&
+        gdk_pixbuf_loader_close(loader, nullptr)) {
+      GdkPixbuf* raw = gdk_pixbuf_loader_get_pixbuf(loader);
+      if (raw) {
+        GdkPixbuf* scaled =
+            gdk_pixbuf_scale_simple(raw, 36, 36, GDK_INTERP_BILINEAR);
+        if (scaled) {
+          gtk_image_set_from_pixbuf(GTK_IMAGE(self->island_thumb_image),
+                                    scaled);
+          g_object_unref(scaled);
+        }
+      }
+    }
+    g_object_unref(loader);
+  } else {
+    gtk_image_set_from_icon_name(GTK_IMAGE(self->island_thumb_image),
+                                 "folder-download-symbolic",
+                                 GTK_ICON_SIZE_LARGE_TOOLBAR);
+  }
+
+  // Rebuild action buttons cleanly
+  GList* children =
+      gtk_container_get_children(GTK_CONTAINER(self->island_buttons_box));
+  for (GList* it = children; it != nullptr; it = it->next) {
+    gtk_widget_destroy(GTK_WIDGET(it->data));
+  }
+  g_list_free(children);
+
+  FlValue* btns = fl_value_lookup_string(args, "buttons");
+  if (btns && fl_value_get_type(btns) == FL_VALUE_TYPE_LIST) {
+    const size_t n = fl_value_get_length(btns);
+    for (size_t i = 0; i < n; ++i) {
+      FlValue* bm = fl_value_get_list_value(btns, i);
+      const gchar* act = LookupString(bm, "action", "");
+      const gchar* lbl = LookupString(bm, "label", "");
+      if (act && act[0] != '\0' && lbl && lbl[0] != '\0') {
+        GtkWidget* btn = gtk_button_new_with_label(lbl);
+        g_object_set_data_full(G_OBJECT(btn), "md_action", g_strdup(act),
+                               g_free);
+        g_signal_connect(btn, "clicked", G_CALLBACK(on_island_button_clicked),
+                         self);
+        gtk_box_pack_start(GTK_BOX(self->island_buttons_box), btn, FALSE, FALSE,
+                           0);
+      }
+    }
+  }
+
+  self->island_position = pos ? pos : "topCenter";
+  gtk_widget_show_all(GTK_WIDGET(self->island_window));
+  gtk_widget_set_visible(self->island_sub_label,
+                         subtitle && subtitle[0] != '\0');
+  gtk_widget_set_visible(self->island_progress_bar, has_progress);
+  apply_island_anchor(self, self->island_position);
+  gtk_widget_queue_draw(GTK_WIDGET(self->island_window));
+}
 
 static void emit_tray_action(MyApplication* self, const char* action) {
   if (!self->desktop_channel) return;
@@ -436,6 +762,18 @@ static void desktop_method_call_handler(FlMethodChannel* channel,
     }
     response = FL_METHOD_RESPONSE(
         fl_method_success_response_new(fl_value_new_bool(ok)));
+  } else if (g_strcmp0(method, "showDynamicIsland") == 0) {
+    if (args) {
+      show_linux_island(self, args);
+    }
+    response = FL_METHOD_RESPONSE(
+        fl_method_success_response_new(fl_value_new_bool(true)));
+  } else if (g_strcmp0(method, "hideDynamicIsland") == 0) {
+    if (self->island_window) {
+      gtk_widget_hide(GTK_WIDGET(self->island_window));
+    }
+    response = FL_METHOD_RESPONSE(
+        fl_method_success_response_new(fl_value_new_bool(true)));
   } else if (g_strcmp0(method, "quitApp") == 0) {
     self->quitting = true;
     response = FL_METHOD_RESPONSE(
@@ -821,6 +1159,10 @@ static void my_application_shutdown(GApplication* application) {
 // Implements GObject::dispose.
 static void my_application_dispose(GObject* object) {
   MyApplication* self = MY_APPLICATION(object);
+  if (self->island_window) {
+    gtk_widget_destroy(GTK_WIDGET(self->island_window));
+    self->island_window = nullptr;
+  }
   stop_linux_ble(self);
   g_clear_pointer(&self->bluez_adapter_path, g_free);
   g_clear_object(&self->system_bus);
@@ -855,6 +1197,17 @@ static void my_application_init(MyApplication* self) {
   self->sounds_enabled = true;
   self->suppress_toggle_signal = false;
   self->quitting = false;
+  self->layer_api = LayerShellApi{};
+  self->island_window = nullptr;
+  self->island_box = nullptr;
+  self->island_thumb_image = nullptr;
+  self->island_title_label = nullptr;
+  self->island_sub_label = nullptr;
+  self->island_progress_bar = nullptr;
+  self->island_buttons_box = nullptr;
+  self->island_accent_argb = 0xFF6750A4;
+  self->island_position = "topCenter";
+  self->island_layer_inited = false;
 }
 
 MyApplication* my_application_new() {

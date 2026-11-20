@@ -109,6 +109,15 @@ DesktopBridge::DesktopBridge(HWND hwnd, flutter::BinaryMessenger* messenger)
           delete heap_peer;
         }
       });
+
+  island_win_ = std::make_unique<DynamicIslandWin>(
+      [hwnd_copy = hwnd_](const std::string& action) {
+        auto* heap_act = new std::string(action);
+        if (!PostMessage(hwnd_copy, kIslandActionMessage, 0,
+                         reinterpret_cast<LPARAM>(heap_act))) {
+          delete heap_act;
+        }
+      });
 }
 
 DesktopBridge::~DesktopBridge() {
@@ -116,6 +125,9 @@ DesktopBridge::~DesktopBridge() {
 }
 
 void DesktopBridge::Cleanup() {
+  if (island_win_) {
+    island_win_->Destroy();
+  }
   if (ble_win_) {
     ble_win_->StopDiscovery();
   }
@@ -180,6 +192,15 @@ std::optional<LRESULT> DesktopBridge::HandleWindowMessage(HWND hwnd,
       proximity_channel_->InvokeMethod(
           "onProximityEvent",
           std::make_unique<flutter::EncodableValue>(std::move(map)));
+    }
+    return 0;
+  }
+
+  if (message == kIslandActionMessage) {
+    std::unique_ptr<std::string> act(reinterpret_cast<std::string*>(lparam));
+    if (act && channel_) {
+      channel_->InvokeMethod("onIslandAction",
+                             std::make_unique<flutter::EncodableValue>(*act));
     }
     return 0;
   }
@@ -288,6 +309,59 @@ void DesktopBridge::HandleMethodCall(
     Cleanup();
     result->Success(flutter::EncodableValue(true));
     PostMessage(hwnd_, WM_CLOSE, 0, 0);
+    return;
+  }
+
+  if (method == "showDynamicIsland") {
+    if (args && island_win_) {
+      DynamicIslandPayloadWin p;
+      p.mode = GetStringArg(args, "mode", "peek");
+      p.position = GetStringArg(args, "position", "topCenter");
+      p.title = Utf8ToWide(GetStringArg(args, "title", "MaterialDrop"));
+      p.subtitle = Utf8ToWide(GetStringArg(args, "subtitle", ""));
+      auto ac_it = args->find(flutter::EncodableValue("accentColor"));
+      if (ac_it != args->end()) {
+        if (std::holds_alternative<int>(ac_it->second)) {
+          p.accent_argb = static_cast<uint32_t>(std::get<int>(ac_it->second));
+        } else if (std::holds_alternative<int64_t>(ac_it->second)) {
+          p.accent_argb =
+              static_cast<uint32_t>(std::get<int64_t>(ac_it->second));
+        }
+      }
+      auto pr_it = args->find(flutter::EncodableValue("progress"));
+      if (pr_it != args->end() && std::holds_alternative<double>(pr_it->second)) {
+        p.progress = std::get<double>(pr_it->second);
+      }
+      p.has_progress = GetBoolArg(args, "hasProgress", false);
+      auto th_it = args->find(flutter::EncodableValue("thumbnailPng"));
+      if (th_it != args->end() &&
+          std::holds_alternative<std::vector<uint8_t>>(th_it->second)) {
+        p.thumbnail_png = std::get<std::vector<uint8_t>>(th_it->second);
+      }
+      auto bt_it = args->find(flutter::EncodableValue("buttons"));
+      if (bt_it != args->end() &&
+          std::holds_alternative<flutter::EncodableList>(bt_it->second)) {
+        for (const auto& item : std::get<flutter::EncodableList>(bt_it->second)) {
+          const auto* bmap = std::get_if<flutter::EncodableMap>(&item);
+          if (!bmap) continue;
+          DynamicIslandButtonSpec spec;
+          spec.action = GetStringArg(bmap, "action", "");
+          spec.label = Utf8ToWide(GetStringArg(bmap, "label", ""));
+          spec.primary = GetBoolArg(bmap, "primary", false);
+          if (!spec.action.empty() && !spec.label.empty()) {
+            p.buttons.push_back(std::move(spec));
+          }
+        }
+      }
+      island_win_->ShowOrUpdate(p);
+    }
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  if (method == "hideDynamicIsland") {
+    if (island_win_) island_win_->Hide();
+    result->Success(flutter::EncodableValue(true));
     return;
   }
 
